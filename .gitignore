@@ -1,0 +1,23 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+bridge
+
+# Local configuration and secrets — never commit real config or state.
+configs/bridge.yaml
+configs/*.local.yaml
+bridge-state.json
+*.state.json
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Test / coverage output
+coverage.out
+*.coverprofile

@@ -1,0 +1,78 @@
+# Readest → BookOrbit bridge configuration.
+#
+# Copy this file to configs/bridge.yaml and fill in your values, or supply the
+# sensitive fields via environment variables instead (recommended for secrets).
+# Every setting is shown with its default; uncomment to override.
+#
+# Environment variable overrides (non-empty values win over this file):
+#   BRIDGE_READEST_EMAIL            readest.email
+#   BRIDGE_READEST_PASSWORD         readest.password
+#   BRIDGE_SUPABASE_URL             readest.supabase_url
+#   BRIDGE_SUPABASE_ANON_KEY        readest.supabase_anon_key
+#   BRIDGE_READEST_SYNC_BASE_URL    readest.sync_base_url
+#   BRIDGE_BOOKORBIT_SERVER_URL     bookorbit.server_url
+#   BRIDGE_BOOKORBIT_USERNAME       bookorbit.username
+#   BRIDGE_BOOKORBIT_PASSWORD       bookorbit.password
+#   BRIDGE_BOOKORBIT_USERKEY        bookorbit.userkey
+#   BRIDGE_BOOKORBIT_DEVICE_NAME    bookorbit.device_name
+#   BRIDGE_BOOKORBIT_DEVICE_ID      bookorbit.device_id
+#   BRIDGE_POLL_INTERVAL            bridge.poll_interval
+#   BRIDGE_LOG_LEVEL                bridge.log_level
+#   BRIDGE_LOG_FORMAT               bridge.log_format
+#   BRIDGE_STATE_FILE               bridge.state_file
+
+readest:
+  # Your Readest account credentials (required). Prefer env vars for these.
+  email: ""
+  password: ""
+
+  # Service endpoints. The defaults are the official hosted Readest service and
+  # almost never need to change. The anon key is public (it identifies the
+  # Supabase project, it is not a secret) and defaults to the bundled value.
+  # supabase_url: "https://readest.supabase.co"
+  # supabase_anon_key: ""   # leave empty to use the built-in default
+  # sync_base_url: "https://web.readest.com/api"
+
+bookorbit:
+  # Base URL of your self-hosted BookOrbit server (required). The "/api/v1"
+  # prefix is added automatically if missing.
+  server_url: ""
+
+  # Account name sent as the x-auth-user header (required).
+  username: ""
+
+  # Authentication: provide EITHER password (hashed to x-auth-key) OR a
+  # pre-hashed userkey. Prefer env vars. If both are set, userkey wins.
+  password: ""
+  # userkey: ""  # 32-char lowercase hex MD5 of the password
+
+  # Device identity shown in BookOrbit. device_id is generated and persisted on
+  # first run if left empty; set it only to pin a specific identity.
+  # device_name: "readest-bridge"
+  # device_id: ""
+
+bridge:
+  # How often to sync in daemon mode. Go duration ("15m", "1h") or seconds.
+  # poll_interval: "15m"
+
+  # Logging: level is debug|info|warn|error; format is json|text.
+  # log_level: "info"
+  # log_format: "json"
+
+  # Path to the JSON state file (tokens, match cache, watermark, device id).
+  # Written atomically with 0600 permissions.
+  # state_file: "bridge-state.json"
+
+  # Batching and request limits (match the reference plugin's behavior).
+  # match_batch_size: 500        # hashes per match-check request
+  # progress_batch_size: 100     # items per bulk-progress request
+  # max_body_bytes: 921600       # 900 KiB request body cap
+
+  # How long an unmatched hash is skipped before re-checking.
+  # unmatched_cooldown: "24h"
+
+  # HTTP timeout and retry/backoff policy for transient failures.
+  # http_timeout: "30s"
+  # retry_max_attempts: 5
+  # retry_initial_backoff: "500ms"
+  # retry_max_backoff: "30s"
