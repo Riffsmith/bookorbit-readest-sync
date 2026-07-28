@@ -3,7 +3,7 @@ package state
 import (
 	"sync"
 
-	"github.com/user/bookorbit-readest-sync/internal/readest"
+	"github.com/user/bookorbit-readest-sync/internal/token"
 )
 
 // MemStore is an in-memory Store for tests and ephemeral runs. It satisfies
@@ -26,14 +26,14 @@ func (s *MemStore) Load() error { return nil }
 func (s *MemStore) Save() error { return nil }
 
 // Token returns the stored token set.
-func (s *MemStore) Token() readest.Token {
+func (s *MemStore) Token() token.Token {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.data.Token
 }
 
 // SetToken records a new token set.
-func (s *MemStore) SetToken(t readest.Token) {
+func (s *MemStore) SetToken(t token.Token) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data.Token = t

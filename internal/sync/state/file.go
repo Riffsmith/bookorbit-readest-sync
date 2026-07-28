@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/user/bookorbit-readest-sync/internal/readest"
+	"github.com/user/bookorbit-readest-sync/internal/token"
 )
 
 // filePerm is the on-disk permission for the state file. It holds credentials
@@ -123,14 +123,14 @@ func (s *FileStore) saveLocked() error {
 }
 
 // Token returns the persisted Supabase token set.
-func (s *FileStore) Token() readest.Token {
+func (s *FileStore) Token() token.Token {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.data.Token
 }
 
 // SetToken records a new token set.
-func (s *FileStore) SetToken(t readest.Token) {
+func (s *FileStore) SetToken(t token.Token) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.data.Token = t

@@ -11,7 +11,7 @@ package state
 import (
 	"errors"
 
-	"github.com/user/bookorbit-readest-sync/internal/readest"
+	"github.com/user/bookorbit-readest-sync/internal/token"
 )
 
 // ErrNotFound is returned when a requested match record is not in the cache.
@@ -32,7 +32,7 @@ type MatchRecord struct {
 // first run and persisted so the bridge keeps one stable identity in BookOrbit.
 type Data struct {
 	// Token is the persisted Supabase credential set.
-	Token readest.Token `json:"token"`
+	Token token.Token `json:"token"`
 
 	// DeviceID is the stable identifier sent to BookOrbit. Empty until first
 	// generation, after which it never changes.
@@ -68,9 +68,9 @@ type Store interface {
 	Save() error
 
 	// Token returns the persisted Supabase token set.
-	Token() readest.Token
+	Token() token.Token
 	// SetToken records a new token set (called after sign-in or refresh).
-	SetToken(t readest.Token)
+	SetToken(t token.Token)
 
 	// DeviceID returns the stable bridge device identity, generating and
 	// recording one via genID on first use.

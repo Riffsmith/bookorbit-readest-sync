@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/user/bookorbit-readest-sync/internal/readest"
+	"github.com/user/bookorbit-readest-sync/internal/token"
 )
 
 // exerciseStore runs the common Store contract against any implementation.
@@ -19,7 +19,7 @@ func exerciseStore(t *testing.T, s Store) {
 	}
 
 	// Token round-trip.
-	tok := readest.Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: 100, ExpiresIn: 3600}
+	tok := token.Token{AccessToken: "a", RefreshToken: "r", ExpiresAt: 100, ExpiresIn: 3600}
 	s.SetToken(tok)
 	if got := s.Token(); got != tok {
 		t.Errorf("Token = %+v, want %+v", got, tok)

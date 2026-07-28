@@ -1,9 +1,7 @@
 package readest
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 
 	"github.com/user/bookorbit-readest-sync/internal/util"
@@ -121,26 +119,5 @@ func TestTokenFreshnessRules(t *testing.T) {
 	}
 	if tok.ExpiresWithin(100, 60) {
 		t.Error("ExpiresWithin should be false when expiry is far off")
-	}
-}
-
-func TestAuthStubReturnsNotImplemented(t *testing.T) {
-	a := NewAuth("https://example.co", "anon", "e@x.com", "pw")
-	if _, err := a.SignIn(context.Background()); !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("SignIn err = %v, want ErrNotImplemented", err)
-	}
-	if _, err := a.Refresh(context.Background()); !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("Refresh err = %v, want ErrNotImplemented", err)
-	}
-	if _, err := a.AccessToken(context.Background()); !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("AccessToken err = %v, want ErrNotImplemented", err)
-	}
-}
-
-func TestClientStubReturnsNotImplemented(t *testing.T) {
-	a := NewAuth("https://example.co", "anon", "e@x.com", "pw")
-	c := NewClient("https://example.com/api", a, nil, nil, 0)
-	if _, err := c.PullBooks(context.Background(), 0); !errors.Is(err, ErrNotImplemented) {
-		t.Errorf("PullBooks err = %v, want ErrNotImplemented", err)
 	}
 }
