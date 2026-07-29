@@ -2,7 +2,11 @@
 /bin/
 /dist/
 *.exe
-bridge
+# Anchored to repo root: catches a stray `go build ./cmd/bridge` binary
+# dropped at the top level without -o. Must NOT be the bare `bridge` pattern
+# (no leading slash) — that also matches the cmd/bridge/ source directory at
+# any depth and silently untracks main.go/device.go.
+/bridge
 
 # Local configuration and secrets — never commit real config or state.
 configs/bridge.yaml

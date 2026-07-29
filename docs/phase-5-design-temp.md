@@ -1,9 +1,9 @@
 # Design: `internal/bookorbit` Client (Phase 5)
 
-**Status:** proposal, awaiting approval. No code is written in this phase.
-**Scope:** the BookOrbit-side REST client only — `Auth`, `MatchCheck`, `BulkProgress`, and the optional `UpdateProgress` fallback; their models; error taxonomy; and their integration points with the Phase 3 config (`Config.AuthKey()`, `util.NormalizeBookOrbitURL`) and Phase 2 foundation (`internal/util/batch.go`, `internal/sync/state`). Everything Readest-side and the sync engine itself are out of scope except where a boundary must be named.
+**Status:** implemented and accepted. This document is the authoritative design record for the shipped client — it describes the code as built in `internal/bookorbit/client.go`, `models.go`, `client_test.go`, and `models_test.go`, not a proposal.
+**Scope:** the BookOrbit-side REST client only — `Auth`, `MatchCheck`, `BulkProgress`, and `UpdateProgress` (the singular-PUT fallback endpoint); their models; error taxonomy; and their integration points with the Phase 3 config (`Config.AuthKey()`, `util.NormalizeBookOrbitURL`) and Phase 2 foundation (`internal/util/batch.go`, `internal/sync/state`). Everything Readest-side and the sync engine itself are out of scope except where a boundary must be named.
 
-Authoritative behavior is taken from `reference/koreader-plugin/bookorbit.koplugin/bookorbit_api.lua` (the entire REST surface), cross-checked against `bookorbit_sweep.lua` (real call sites and real response-field usage), `bookorbit_book_sync.lua` (single-book match-check call site), `bookorbit_progress_sync.lua` (the singular-PUT fallback endpoint), and `bookorbit_state.lua` (the match-cache shape `internal/sync/state` already mirrors). Where the planning docs disagree with the plugin source, the plugin wins, and the disagreement is flagged in §15.
+Authoritative behavior is taken from `reference/koreader-plugin/bookorbit.koplugin/bookorbit_api.lua` (the entire REST surface), cross-checked against `bookorbit_sweep.lua` (real call sites and real response-field usage), `bookorbit_book_sync.lua` (single-book match-check call site), `bookorbit_progress_sync.lua` (the singular-PUT fallback endpoint), and `bookorbit_state.lua` (the match-cache shape `internal/sync/state` already mirrors). Where the planning docs disagreed with the plugin source, the plugin won; those resolved discrepancies are recorded in §15.
 
 ---
 
@@ -15,12 +15,12 @@ This mirrors the boundary already drawn and accepted in Phase 4 (`docs/phase-4-d
 
 | Concern | Owner | Crosses via |
 |---|---|---|
-| Static credentials (`x-auth-user`/`x-auth-key`) | `config.Config` (`AuthKey()`, already implemented) | Constructor params |
-| Server URL normalization | `internal/util.NormalizeBookOrbitURL` (already implemented, already applied in `config.finalize()`) | `cfg.BookOrbit.ServerURL` is pre-normalized by the time it reaches this package |
-| BookOrbit transport + decode + classification | `bookorbit.Client` (**this phase**) | `API` interface |
-| Wire request/response shapes | `bookorbit` models (`models.go`, partially present, extended this phase) | value types |
-| Match-cache, unmatched cooldown, per-book last-pushed percentage | `internal/sync/state.Store` (already implemented) | consumed by the engine, **not** by this package |
-| Batching (500 hashes/match-check, 100 items/bulk-progress) | `internal/util.Batch`/`BatchFunc` (already implemented) + the sync engine (Phase 6) | the client sends exactly what it is given, once |
+| Static credentials (`x-auth-user`/`x-auth-key`) | `config.Config` (`AuthKey()`) | Constructor params |
+| Server URL normalization | `internal/util.NormalizeBookOrbitURL` (applied in `config.finalize()`) | `cfg.BookOrbit.ServerURL` is pre-normalized by the time it reaches this package |
+| BookOrbit transport + decode + classification | `bookorbit.Client` | `API` interface |
+| Wire request/response shapes | `bookorbit` models (`models.go`) | value types |
+| Match-cache, unmatched cooldown, per-book last-pushed percentage | `internal/sync/state.Store` | consumed by the engine, **not** by this package |
+| Batching (500 hashes/match-check, 100 items/bulk-progress) | `internal/util.Batch`/`BatchFunc` + the sync engine (Phase 6) | the client sends exactly what it is given, once |
 | Retry/backoff policy | `sync.Engine` (Phase 6), driven by `config.Bridge.Retry*` | the client returns classified sentinel errors only |
 
 **What this package does NOT do**, matching the "client is faithful, engine is selective" principle already established for `internal/readest` (Phase 4 design §7):
@@ -34,30 +34,18 @@ This mirrors the boundary already drawn and accepted in Phase 4 (`docs/phase-4-d
 
 ## 2. Public API for `internal/bookorbit`
 
-### 2.1 Interface — one required change, one addition
-
-The interface already declared in the Phase 2 foundation (`client.go`) is:
-
-```go
-type API interface {
-    Auth(ctx context.Context) error
-    MatchCheck(ctx context.Context, req MatchCheckRequest) (MatchCheckResponse, error)
-    BulkProgress(ctx context.Context, req BulkProgressRequest) error
-}
-```
-
-**Required fix (not optional — see §15.1):** `BulkProgress` must return the decoded response, not just an error. The only field the reference plugin reads off a bulk-progress response is `body.unmatched` (`bookorbit_sweep.lua:stepProgressNext`, verified), and the engine cannot mark a book unmatched (`state.Store.SetUnmatched`) without it. The current stub signature silently discards that data.
+### 2.1 Interface
 
 ```go
 type API interface {
     Auth(ctx context.Context) error
     MatchCheck(ctx context.Context, req MatchCheckRequest) (MatchCheckResponse, error)
     BulkProgress(ctx context.Context, req BulkProgressRequest) (BulkProgressResponse, error)
-    UpdateProgress(ctx context.Context, req UpdateProgressRequest) error // new, fallback-only (§9)
+    UpdateProgress(ctx context.Context, req UpdateProgressRequest) error
 }
 ```
 
-This is flagged explicitly under §20 as a decision requiring sign-off, since it changes an already-accepted public interface — but it is a correctness fix backed directly by verified plugin behavior, not a style preference.
+`BulkProgress` returns the decoded response, not just an error. The only field the reference plugin reads off a bulk-progress response is `body.unmatched` (`bookorbit_sweep.lua:stepProgressNext`, verified), and the engine cannot mark a book unmatched (`state.Store.SetUnmatched`) without it — the Phase 2 foundation's stub signature would have silently discarded that data.
 
 ### 2.2 Concrete type
 
@@ -70,8 +58,8 @@ type Client struct {
     http     httpclient.Doer
     log      *slog.Logger
     maxBody  int64
-    timeout  time.Duration        // proposed addition, §3
-    now      func() time.Time     // proposed addition, §3 — injectable clock for DeviceTime freshness
+    timeout  time.Duration
+    now      func() time.Time // injectable clock for DeviceTime freshness
 }
 
 func NewClient(
@@ -80,7 +68,7 @@ func NewClient(
     hc httpclient.Doer,
     log *slog.Logger,
     maxBody int64,
-    timeout time.Duration, // proposed addition
+    timeout time.Duration,
 ) *Client
 ```
 
@@ -90,25 +78,25 @@ func NewClient(
 
 ## 3. Constructor dependencies and rationale
 
-| Dep | Justification | Verdict |
-|---|---|---|
-| `baseURL string` | Already-normalized BookOrbit API base (`{server}/api/v1`), from `config.BookOrbit.ServerURL` via `config.finalize()` → `util.NormalizeBookOrbitURL`. | **Keep** (already in stub). |
-| `username string` | Sent verbatim as `x-auth-user`. From `config.BookOrbit.Username`. | **Keep.** |
-| `authKey string` | Sent verbatim as `x-auth-key`. From `config.AuthKey()` (already implemented — MD5 of password, or pre-hashed userkey normalized to lowercase). | **Keep.** No hashing happens inside this package; `config.AuthKey()` already owns that. |
-| `device DeviceInfo` | Static per-bridge identity (`DeviceID`, `DeviceModel`, `PluginVersion`) sent on every device-wrapped call. Verified: `bookorbit_api.lua:new()` stores these once at construction (`self.device_id`, `self.device_model`, `self.plugin_version`). | **Keep** (already in stub). |
-| `hc httpclient.Doer` | Injected transport, same seam Phase 3/4 use for mockability. | **Keep** (already in stub). |
-| `log *slog.Logger` | Structured lifecycle logging; nil → `slog.Default()`, matching `NewAuth`'s convention. | **Keep** (already in stub). |
-| `maxBody int64` | Client-side request-body cap. Verified: `bookorbit_api.lua:requestBlocking` checks `#body_json > MAX_BODY_BYTES` (900×1024) **after encoding, before sending**, returning `"body_too_large"` without dispatching the request. From `config.Bridge.MaxBodyBytes` (already defaulted to 900×1024, matching the plugin exactly). | **Keep** (already in stub); this phase must actually *use* it. |
-| `timeout time.Duration` | **Proposed addition**, mirroring Phase 4 Decision D (accepted): honor as a per-call `context.WithTimeout`. Justification: the plugin does give BookOrbit calls their own timeout tier (`socketutil.LARGE_BLOCK_TIMEOUT`/`LARGE_TOTAL_TIMEOUT`, distinct from the file-transfer timeout tier) — verified in `bookorbit_api.lua:requestBlocking`, though the exact durations aren't in the provided source (§16.5). A per-call deadline independent of the transport default matters more here than for Readest, since bulk-progress payloads can approach 900 KiB on slow self-hosted hardware. Defaults to `config.Bridge.HTTPTimeout` at the call site, same as `readest.NewClient`. | **Flag for approval** (§20-D). |
-| `now func() time.Time` | Not a constructor parameter; a settable field defaulting to `time.Now`, used only to stamp `deviceTime`/`device_time` fields fresh on every request (see §7.4). Mirrors Phase 3's injectable-clock convention (`Auth.now`). | Internal field, no constructor change. |
+| Dep | Justification |
+|---|---|
+| `baseURL string` | Already-normalized BookOrbit API base (`{server}/api/v1`), from `config.BookOrbit.ServerURL` via `config.finalize()` → `util.NormalizeBookOrbitURL`. |
+| `username string` | Sent verbatim as `x-auth-user`. From `config.BookOrbit.Username`. |
+| `authKey string` | Sent verbatim as `x-auth-key`. From `config.AuthKey()` (MD5 of password, or pre-hashed userkey normalized to lowercase). No hashing happens inside this package; `config.AuthKey()` owns that. |
+| `device DeviceInfo` | Static per-bridge identity (`DeviceID`, `DeviceModel`, `PluginVersion`) sent on every device-wrapped call. Verified: `bookorbit_api.lua:new()` stores these once at construction (`self.device_id`, `self.device_model`, `self.plugin_version`). |
+| `hc httpclient.Doer` | Injected transport, same seam Phase 3/4 use for mockability. |
+| `log *slog.Logger` | Structured lifecycle logging; nil → `slog.Default()`, matching `NewAuth`'s convention. |
+| `maxBody int64` | Client-side request-body cap. Verified: `bookorbit_api.lua:requestBlocking` checks `#body_json > MAX_BODY_BYTES` (900×1024) **after encoding, before sending**, returning `"body_too_large"` without dispatching the request. From `config.Bridge.MaxBodyBytes` (defaulted to 900×1024, matching the plugin exactly). |
+| `timeout time.Duration` | Honored as a per-call `context.WithTimeout`, mirroring Phase 4's `readest.Client`. The plugin does give BookOrbit calls their own timeout tier (`socketutil.LARGE_BLOCK_TIMEOUT`/`LARGE_TOTAL_TIMEOUT`, distinct from the file-transfer timeout tier) — verified in `bookorbit_api.lua:requestBlocking`, though the exact durations aren't in the provided reference source (see §16, live-validation item 7). A per-call deadline independent of the transport default matters more here than for Readest, since bulk-progress payloads can approach 900 KiB on slow self-hosted hardware. Defaults to `config.Bridge.HTTPTimeout` at the CLI wiring layer (`cmd/bridge/main.go`), same as `readest.NewClient`. |
+| `now func() time.Time` | Not a constructor parameter; a settable field defaulting to `time.Now`, used only to stamp `deviceTime`/`device_time` fields fresh on every request (§7.4). Mirrors Phase 3's injectable-clock convention (`Auth.now`). |
 
 **Not injected, deliberately:** `state.Store`. Unlike `readest.Auth`, this client has nothing to persist — no token, no rotation, no watermark. Match-cache ownership stays entirely with the engine, matching the boundary in §1.
 
 ---
 
-## 4. Required request/response models
+## 4. Request/response models
 
-### 4.1 Already correct, keep as-is
+### 4.1 Verified against the plugin, unchanged from the Phase 2 foundation
 
 - `Match { Hash, BookFileID, BookID }` — verified against `bookorbit_sweep.lua:stepMatchNext` (`match.hash`, `match.bookFileId`, `match.bookId`).
 - `MatchCheckResponse { Matches, Unmatched, LibraryVersion }` — verified against `stepMatchNext` and `bookorbit_book_sync.lua:stepMatch` (`body.matches`, `body.unmatched`, `body.libraryVersion`).
@@ -116,10 +104,10 @@ func NewClient(
 - `DeviceInfo { DeviceID, DeviceModel, PluginVersion, DeviceTime }` and `DeviceTimeFormat` — verified against `withDevice`.
 - `BulkProgressRequest { DeviceID, DeviceModel, PluginVersion, DeviceTime, Items }` and `DeviceInfo.WithDevice(items)` — verified against `bulkProgress(items)` → `self:withDevice({items = items})`.
 
-### 4.2 Required corrections (gaps found while designing Phase 5)
+### 4.2 Corrections applied during this phase (verified against the plugin source)
 
-**(a) `MatchCandidate` is missing `MetadataAmbiguous`.**
-Verified: `bookorbit_api.lua:matchCheck` builds each candidate as `{hash, title, authors, lastOpen, source, metadataAmbiguous = cand.metadata_ambiguous}`. The current stub omits `metadataAmbiguous` entirely. Both real call sites populate it — `bookorbit_sweep.lua`'s `ctx.candidates[md5].metadata_ambiguous` and `bookorbit_book_sync.lua`'s `ctx.snap.metadata_ambiguous`.
+**(a) `MatchCandidate` gained `MetadataAmbiguous`.**
+Verified: `bookorbit_api.lua:matchCheck` builds each candidate as `{hash, title, authors, lastOpen, source, metadataAmbiguous = cand.metadata_ambiguous}`. Both real call sites populate it — `bookorbit_sweep.lua`'s `ctx.candidates[md5].metadata_ambiguous` and `bookorbit_book_sync.lua`'s `ctx.snap.metadata_ambiguous`.
 
 ```go
 type MatchCandidate struct {
@@ -132,8 +120,8 @@ type MatchCandidate struct {
 }
 ```
 
-**(b) `MatchCheckRequest` is missing the device wrapper.**
-Verified: `matchCheck` dispatches via `self:request("POST", "/koreader/plugin/match-check", self:withDevice(payload))` — **every** field-check payload is device-wrapped, not just bulk-progress. The current stub's `MatchCheckRequest` has only `Hashes`/`Books`. Mirroring the already-accepted `BulkProgressRequest` pattern exactly:
+**(b) `MatchCheckRequest` gained the device wrapper.**
+Verified: `matchCheck` dispatches via `self:request("POST", "/koreader/plugin/match-check", self:withDevice(payload))` — **every** match-check payload is device-wrapped, not just bulk-progress. Mirrors the `BulkProgressRequest` pattern exactly:
 
 ```go
 type MatchCheckRequest struct {
@@ -154,8 +142,8 @@ func (d DeviceInfo) WithMatchCheck(hashes []string, books []MatchCandidate) Matc
 }
 ```
 
-**(c) `BulkProgressResponse.Updated` is unverified and should be replaced.**
-No line in any provided reference source reads an `updated` field from a bulk-progress response. The only field the plugin consumes is `body.unmatched` (`stepProgressNext`, verified twice — sweep and, by the same shape, any future single-call use). Per "never invent APIs," `Updated` should be removed rather than kept as a guess:
+**(c) `BulkProgressResponse.Updated` replaced with the verified `Unmatched`.**
+No line in any provided reference source read an `updated` field from a bulk-progress response; that field in the Phase 2 stub was speculative. The only field the plugin consumes is `body.unmatched` (`stepProgressNext`, verified):
 
 ```go
 type BulkProgressResponse struct {
@@ -166,12 +154,12 @@ type BulkProgressResponse struct {
 **(d) New: `UpdateProgressRequest`** (fallback endpoint, §9), verified against `bookorbit_api.lua:updateProgress`:
 
 ```go
-// Note the field naming deliberately does NOT match the plugin's own
-// camelCase convention (deviceId, pluginVersion, ...) used everywhere else
-// in this package. That's not a bridge inconsistency — /koreader/syncs/progress
+// The field naming deliberately does NOT match the plugin's own camelCase
+// convention (deviceId, pluginVersion, ...) used everywhere else in this
+// package. That's not a bridge inconsistency — /koreader/syncs/progress
 // is the kosync-compatible endpoint shared with vanilla KOReader's stock sync
 // plugin, not a BookOrbit-native /koreader/plugin/* endpoint, and it uses
-// kosync's own snake_case-ish wire shape. Verified: bookorbit_api.lua:updateProgress.
+// kosync's own wire shape. Verified: bookorbit_api.lua:updateProgress.
 type UpdateProgressRequest struct {
     Document   string  `json:"document"`
     Percentage float64 `json:"percentage"`
@@ -189,9 +177,7 @@ func (d DeviceInfo) WithUpdateProgress(document string, percentage float64, prog
 }
 ```
 
-No response model is needed for `UpdateProgress`: the plugin's own call sites (`bookorbit_progress_sync.lua`) treat the PUT as success/failure only and never read a field back from its body.
-
-No response model is needed for `Auth`: the plugin only checks `body ~= nil` (`bookorbit_main_menu.lua:testConnection`). `Auth(ctx) error` stays exactly as declared.
+No response model exists for `Auth` or `UpdateProgress`: the plugin's own call sites only check success/failure and never read a field back from either body (`bookorbit_main_menu.lua:testConnection` checks `body ~= nil`; `bookorbit_progress_sync.lua` treats the PUT as success/failure only). `Auth(ctx) error` and `UpdateProgress(ctx, req) error` reflect that.
 
 ---
 
@@ -212,7 +198,7 @@ Request:
   "deviceTime": "2026-01-02 03:04:05"
 }
 ```
-`hashes` and `books` must serialize as `[]`, never `null`, even when empty — see §7.5.
+`hashes` and `books` serialize as `[]`, never `null`, even when empty — see §7.5.
 
 Response:
 ```json
@@ -222,7 +208,7 @@ Response:
   "libraryVersion": "opaque-token"
 }
 ```
-`matches`/`unmatched` may be absent or `null` on the wire; the plugin treats both as `{}` (`body.matches or {}`), so the client must normalize to non-nil empty slices on decode (mirrors `readest.decodeBooks`'s `Books == nil` normalization, already an established pattern in this codebase).
+`matches`/`unmatched` may be absent or `null` on the wire; the plugin treats both as `{}` (`body.matches or {}`), so the client normalizes to non-nil empty slices on decode (mirrors `readest.decodeBooks`'s `Books == nil` normalization, an established pattern in this codebase).
 
 ### `POST /koreader/plugin/progress`
 
@@ -261,7 +247,7 @@ No device wrapper — this is the kosync shape, not the BookOrbit-plugin shape. 
 
 ### `GET /koreader/users/auth`
 
-No request body. Response body shape unconfirmed and unmodeled (§16.2) — success is simply "the request returned a non-error body," matching `testConnection`'s `if body then ...`.
+No request body. Response body shape is unmodeled (§16.2) — success is simply "the request returned a 2xx status," matching `testConnection`'s `if body then ...`.
 
 ---
 
@@ -284,9 +270,9 @@ No request body. Response body shape unconfirmed and unmodeled (§16.2) — succ
 
 **Headers, only when a body is present** (POST/PUT):
 - `Content-Type: application/json`
-- `Content-Length` — verified the plugin sets this explicitly (`request.headers["Content-Length"] = #body_json`). In Go, `net/http` computes `Content-Length` automatically when the request body is a `*bytes.Reader`/`*bytes.Buffer` (both implement `Len()`), so no manual header is needed — this is a Go-runtime detail to verify during implementation (§16.6), not a design gap.
+- `Content-Length` — the plugin sets this explicitly (`request.headers["Content-Length"] = #body_json`); in Go, `net/http` computes `Content-Length` automatically when the request body is a `*bytes.Reader` (which implements `Len()`), so no manual header is set. Confirmed via `TestMatchCheckHeaders`, which asserts `req.ContentLength` matches the encoded body length.
 
-**Authentication:** static, no expiry, no refresh, no OAuth, no signing beyond the two fixed headers above. This is a hard architectural contrast with `readest.Auth` and should not be given a token-refresh code path — there is none in the reference plugin (`bookorbit_api.lua` sends `x-auth-user`/`x-auth-key` unconditionally on `NewClient`, with no rotation logic anywhere in the file).
+**Authentication:** static, no expiry, no refresh, no OAuth, no signing beyond the two fixed headers above. This is a hard architectural contrast with `readest.Auth`: there is no token-refresh code path in this package, matching the reference plugin (`bookorbit_api.lua` sends `x-auth-user`/`x-auth-key` unconditionally on `NewClient`, with no rotation logic anywhere in the file).
 
 **On a 401/403:** unlike the Readest client, there is **no** re-auth-and-retry dance, because there is no second credential state to refresh. A 401/403 means the configured username/authKey are wrong (or the server rejected them for another reason) and is terminal for that call.
 
@@ -296,28 +282,28 @@ No request body. Response body shape unconfirmed and unmodeled (§16.2) — succ
 
 ### 7.1 What the client does
 
-One HTTP round trip: given a `MatchCheckRequest` (hashes + candidates, already device-stamped via `DeviceInfo.WithMatchCheck` or built by hand), POST it, decode the response into `MatchCheckResponse`, normalize `Matches`/`Unmatched` to non-nil, return.
+One HTTP round trip: given a `MatchCheckRequest` (hashes + candidates), POST it, decode the response into `MatchCheckResponse`, normalize `Matches`/`Unmatched` to non-nil, return.
 
 ### 7.2 Batching — NOT the client's job
 
-Verified: `MATCH_BATCH = 500` in `bookorbit_sweep.lua`. The chunking loop (`ctx.match_queue`, built with `for i = 1, #to_check, MATCH_BATCH`) lives in the sweep orchestration, not in `bookorbit_api.lua:matchCheck` itself — `matchCheck` always sends exactly the hashes it's handed. This confirms the architectural split already decided in §1: **the engine (Phase 6) chunks using `internal/util.Batch`/`BatchFunc` against `config.Bridge.MatchBatchSize`, calling `Client.MatchCheck` once per chunk.** No batching logic belongs in this package.
+Verified: `MATCH_BATCH = 500` in `bookorbit_sweep.lua`. The chunking loop (`ctx.match_queue`, built with `for i = 1, #to_check, MATCH_BATCH`) lives in the sweep orchestration, not in `bookorbit_api.lua:matchCheck` itself — `matchCheck` always sends exactly the hashes it's handed. **The engine (Phase 6) chunks using `internal/util.Batch`/`BatchFunc` against `config.Bridge.MatchBatchSize`, calling `Client.MatchCheck` once per chunk.** No batching logic exists in this package.
 
 ### 7.3 Caching — NOT the client's job
 
-The match cache (hash → `bookFileId`/`bookId`) and the unmatched cooldown (`config.Bridge.UnmatchedCooldown`) are entirely `state.Store`'s responsibility, already implemented in Phase 2 (`Match`/`SetMatch`/`DeleteMatch`, `UnmatchedAt`/`SetUnmatched`/`ClearUnmatched`). This client is stateless between calls — it holds no cache and must not.
+The match cache (hash → `bookFileId`/`bookId`) and the unmatched cooldown (`config.Bridge.UnmatchedCooldown`) are entirely `state.Store`'s responsibility (Phase 2: `Match`/`SetMatch`/`DeleteMatch`, `UnmatchedAt`/`SetUnmatched`/`ClearUnmatched`). This client is stateless between calls — it holds no cache.
 
 ### 7.4 Response handling and the device-time freshness problem
 
-This is the one nuance worth flagging explicitly. `withDevice` in Lua calls `os.date(...)` fresh, immediately before every dispatch (`bookorbit_api.lua:withDevice`, called from inside `matchCheck`/`bulkProgress` themselves, not by the caller). If the Go engine builds a batch of `MatchCheckRequest` values up front (e.g., while iterating `ctx.match_queue`) and only *later* calls `Client.MatchCheck` on each, a caller-stamped `DeviceTime` could go stale relative to when the request actually goes out — a divergence from the plugin's exact behavior.
+`withDevice` in Lua calls `os.date(...)` fresh, immediately before every dispatch (`bookorbit_api.lua:withDevice`, called from inside `matchCheck`/`bulkProgress` themselves, not by the caller). If the Go engine builds a batch of `MatchCheckRequest` values up front (e.g., while iterating `ctx.match_queue`) and only *later* calls `Client.MatchCheck` on each, a caller-stamped `DeviceTime` could go stale relative to when the request actually goes out — a divergence from the plugin's exact behavior.
 
-**Design decision (flag for approval, §20-E):** `Client.MatchCheck`/`BulkProgress`/`UpdateProgress` overwrite `DeviceID`/`DeviceModel`/`PluginVersion`/`DeviceTime` on the request they receive, using the client's own static `device` field and `c.now()`, immediately before marshaling — regardless of what the caller populated. This:
+**Implemented:** `Client.MatchCheck`/`BulkProgress`/`UpdateProgress` overwrite `DeviceID`/`DeviceModel`/`PluginVersion`/`DeviceTime` on the request they receive, using the client's own static `device` field and `c.now()`, immediately before marshaling — regardless of what the caller populated. This:
 - Exactly reproduces the plugin's "stamp at dispatch time" behavior.
 - Removes any need for the engine to worry about staleness across a batch loop.
-- Makes `DeviceInfo.WithMatchCheck`/`WithDevice`/`WithUpdateProgress` convenience constructors rather than the only correct way to build a request — a caller could pass a zero-value device wrapper and the client would still stamp it correctly.
+- Makes `DeviceInfo.WithMatchCheck`/`WithDevice`/`WithUpdateProgress` convenience constructors rather than the only correct way to build a request — a caller can pass a zero-value device wrapper and the client will still stamp it correctly. `TestMatchCheckDeviceFieldsStampedAtTopLevel` and `TestUpdateProgressOverridesCallerDeviceFields` pin this by asserting that deliberately stale/garbage caller-supplied device values are overwritten on the wire.
 
 ### 7.5 Empty-array encoding
 
-Verified: the plugin's `rapidjson.encode(body, {empty_table_as_array = true})` exists specifically because "the backend rejects empty `{}` where it expects arrays" (`reference-map.md`, Key Behavioral Constants table). Go's `encoding/json` already encodes a **non-nil, empty** slice as `[]` — the only failure mode is a **nil** slice encoding as `null`. The client must therefore normalize `Hashes`/`Books`/`Items` to non-nil empty slices (`make([]T, 0)`) before marshaling if the caller passed `nil`. This is a pure Go-side implementation detail, fully within our control — no live validation needed (§15.10).
+Verified: the plugin's `rapidjson.encode(body, {empty_table_as_array = true})` exists specifically because "the backend rejects empty `{}` where it expects arrays" (`reference-map.md`, Key Behavioral Constants table). Go's `encoding/json` already encodes a **non-nil, empty** slice as `[]` — the only failure mode is a **nil** slice encoding as `null`. The client normalizes `Hashes`/`Books`/`Items` to non-nil empty slices (`make([]T, 0)`) before marshaling when the caller passed `nil`, confirmed by `TestMatchCheckEmptySlicesEncodeAsArrayNotNull` and `TestBulkProgressRequestShapeDeviceWrapped`.
 
 ---
 
@@ -325,7 +311,7 @@ Verified: the plugin's `rapidjson.encode(body, {empty_table_as_array = true})` e
 
 ### 8.1 What the client does
 
-One HTTP round trip: given a `BulkProgressRequest` (already or about-to-be device-stamped, see §7.4), POST it, decode into `BulkProgressResponse{Unmatched}`, normalize `Unmatched` to non-nil, return `(BulkProgressResponse, error)`.
+One HTTP round trip: given a `BulkProgressRequest`, POST it, decode into `BulkProgressResponse{Unmatched}`, normalize `Unmatched` to non-nil, return `(BulkProgressResponse, error)`.
 
 ### 8.2 Batching
 
@@ -333,29 +319,29 @@ Verified: `PROGRESS_BATCH = 100` in `bookorbit_sweep.lua`. Same split as §7.2 �
 
 ### 8.3 Limits
 
-`config.Bridge.MaxBodyBytes` (900×1024, verified against `MAX_BODY_BYTES` in `bookorbit_api.lua`) is enforced by the client **after** JSON-encoding the fully device-stamped request and **before** dispatching: if `len(encoded) > maxBody`, return `ErrBodyTooLarge` and make no HTTP call. This mirrors the plugin's exact ordering (`request(...)`: encode → check length → only then build the socket request).
+`config.Bridge.MaxBodyBytes` (900×1024, verified against `MAX_BODY_BYTES` in `bookorbit_api.lua`) is enforced by the client **after** JSON-encoding the fully device-stamped request and **before** dispatching: if `len(encoded) > maxBody`, `ErrBodyTooLarge` is returned and no HTTP call is made. This mirrors the plugin's exact ordering (`request(...)`: encode → check length → only then build the socket request). `TestMatchCheckBodyTooLargeMakesNoRequest` and `TestBulkProgressBodyTooLargeMakesNoRequest` assert zero requests are dispatched.
 
 ### 8.4 Response handling
 
-`unmatched` is the only field consumed anywhere in the reference source (§4.2c). A hash appearing in `unmatched` means the engine should call `state.Store.SetUnmatched(hash, now)` and mark that book's push as failed for this pass (`pending.failed = true` in `stepProgressNext` — Phase 6 concern, not this client's).
+`unmatched` is the only field consumed anywhere in the reference source (§4.2c). A hash appearing in `unmatched` means the engine should call `state.Store.SetUnmatched(hash, now)` and mark that book's push as failed for this pass (`pending.failed = true` in `stepProgressNext` — a Phase 6 concern, not this client's).
 
 ---
 
-## 9. Optional `UpdateProgress` fallback
+## 9. `UpdateProgress` fallback
 
-**Should it exist?** Yes — implement it in Phase 5. Two independent justifications:
+The endpoint is implemented in this phase, per two independent justifications:
 1. `docs/implementation-roadmap.md`'s own Phase 5 scope explicitly lists it: *"Fallback UpdateProgress(...) single-item PUT (optional but recommended for version fallback)."*
 2. `docs/planning.md` §6 recommendation 1 and `docs/reverse-engineering-report.md` §6 recommendation 1 both independently conclude bulk-progress is the primary path and the singular PUT is a version-compatibility fallback, not a routine code path.
 
-**When should it be used?** Only when `BulkProgress` is confirmed unsupported by the target server (e.g., an older BookOrbit build without `/koreader/plugin/progress`). **This phase does not decide the trigger condition or implement the fallback policy** — that is Phase 6's job, once the engine exists to hold "is bulk unsupported" state. The closest verified analog in the reference source is `bookorbit_sweep.lua`'s legacy annotation-upload fallback (`ctx.use_legacy_annotations`, triggered on `err == "unsupported_server"` from the exchange endpoint), but that is a **different endpoint pair** (annotations exchange vs. legacy upload) — there is no direct reference precedent for a bulk-progress → singular-PUT fallback trigger. Extrapolating that pattern to progress endpoints is therefore a **bridge-specific design decision**, not a verified plugin behavior, and is deferred entirely to Phase 6's design.
+**When it should be used:** only when `BulkProgress` is confirmed unsupported by the target server (e.g., an older BookOrbit build without `/koreader/plugin/progress`). **This phase does not decide the trigger condition or implement the fallback policy** — that is Phase 6's job, once the engine exists to hold "is bulk unsupported" state. The closest verified analog in the reference source is `bookorbit_sweep.lua`'s legacy annotation-upload fallback (`ctx.use_legacy_annotations`, triggered on `err == "unsupported_server"` from the exchange endpoint), but that is a **different endpoint pair** (annotations exchange vs. legacy upload) — there is no direct reference precedent for a bulk-progress → singular-PUT fallback trigger. Extrapolating that pattern to the progress endpoints was a deliberate bridge-specific design decision (§15.7), not a verified plugin behavior, and remains deferred to Phase 6.
 
-**Why not implement the fallback *policy* here too?** Because the trigger condition depends on `state.Store` (to remember "this server doesn't support bulk, stop trying") and on retry/backoff sequencing, both of which are explicitly Phase 6 concerns per the roadmap. Phase 5's job is only to make the endpoint callable.
+**Why the fallback *policy* isn't implemented here too:** the trigger condition depends on `state.Store` (to remember "this server doesn't support bulk, stop trying") and on retry/backoff sequencing, both explicitly Phase 6 concerns per the roadmap. This phase's job was only to make the endpoint callable — done.
 
 ---
 
 ## 10. Error taxonomy and retry classification
 
-Following the established Phase 4 pattern exactly (distinct, `errors.Is`-matchable sentinels, each wrapped via `%w` with status + a bounded body snippet):
+Following the Phase 4 pattern (distinct, `errors.Is`-matchable sentinels, each wrapped via `%w` with status + a bounded body snippet):
 
 ```go
 var (
@@ -370,7 +356,9 @@ var (
 )
 ```
 
-`ErrUnsupportedEndpoint` (404/405) is distinct from `ErrBadRequest` (400) specifically so Phase 6 can key its fallback-trigger logic off `errors.Is(err, bookorbit.ErrUnsupportedEndpoint)` without conflating it with a generic client bug. This mirrors how Phase 4 gave `isDashboardUnsupported` (404/405) its own check in the BookOrbit KOReader plugin's own catalog code (`bookorbit_catalog.lua`), the closest verified precedent for "404/405 means feature unsupported" in this codebase — a legitimate pattern to reuse, even though it's from a different (catalog) endpoint.
+`ErrUnsupportedEndpoint` (404/405) is distinct from `ErrBadRequest` (400) specifically so Phase 6 can key its fallback-trigger logic off `errors.Is(err, bookorbit.ErrUnsupportedEndpoint)` without conflating it with a generic client bug. This mirrors how the BookOrbit KOReader plugin's own catalog code gives "404/405 means feature unsupported" its own check (`isDashboardUnsupported`, `bookorbit_catalog.lua`) — the closest verified precedent for this pattern in the codebase, even though it comes from a different (catalog) endpoint. The extrapolation to the progress endpoints (§15.7) has no direct reference precedent and is a deliberate bridge-specific decision, not verified plugin behavior.
+
+One classifier (`classifyErrorResponse`) is applied uniformly across every endpoint in the package:
 
 | Failure | Sentinel | Retryable by engine? |
 |---|---|---|
@@ -383,7 +371,7 @@ var (
 | 2xx, bad JSON | `ErrMalformedResponse` | No |
 | encoded body > `maxBody` | `ErrBodyTooLarge` | No — request is never sent; retrying without shrinking the batch cannot help |
 
-`ErrBodyTooLarge` is a **bridge-specific improvement** over the reference plugin's own error model: `bookorbit_api.lua` returns a bare string `"body_too_large"` which its own caller-side `isTransportError(err) = type(err) ~= "number"` classifies as transport-retryable — almost certainly a latent bug in the Lua reference (a request that's too large stays too large on retry). The Go client should not copy this; it gets its own precise, non-retryable sentinel. This deviation is deliberate and documented here rather than silently diverging.
+`ErrBodyTooLarge` is a **bridge-specific improvement** over the reference plugin's own error model: `bookorbit_api.lua` returns a bare string `"body_too_large"` which its own caller-side `isTransportError(err) = type(err) ~= "number"` classifies as transport-retryable — almost certainly a latent bug in the Lua reference (a request that's too large stays too large on retry). The Go client does not copy this; it gets its own precise, non-retryable sentinel. This is a deliberate, documented deviation, not an oversight.
 
 ---
 
@@ -400,13 +388,13 @@ Phase 6, once built, will:
 7. Apply `config.Bridge.Retry*` backoff around any call that returns `ErrRateLimited`/`ErrServer`/`ErrNetwork`.
 8. Decide, using its own state (not this package's), whether to fall back to `Client.UpdateProgress` per book (§9).
 
-This package exposes exactly what step 1–8 need and nothing else — no method here performs steps 1, 2, 3, 5, 6, 7, or 8.
+This package exposes exactly what steps 1–8 need and nothing else — no method here performs steps 1, 2, 3, 5, 6, 7, or 8.
 
 ---
 
-## 12. Concurrency expectations
+## 12. Concurrency
 
-**No synchronization needed**, and for an even simpler reason than Phase 4's `readest.Client`: this client has no shared mutable resource at all. `Client`'s fields (`baseURL`, `username`, `authKey`, `device`, `http`, `log`, `maxBody`, `timeout`, `now`) are all immutable after construction (the `now` field is a function value, not shared mutable state). There is no token to refresh, no mutex-guarded critical section anywhere in this package. `Client` is safe for concurrent use by construction, not by discipline.
+**No synchronization was needed**, for an even simpler reason than Phase 4's `readest.Client`: this client has no shared mutable resource at all. `Client`'s fields (`baseURL`, `username`, `authKey`, `device`, `http`, `log`, `maxBody`, `timeout`, `now`) are all immutable after construction (the `now` field is a function value, not shared mutable state). There is no token to refresh, no mutex-guarded critical section anywhere in this package. `Client` is safe for concurrent use by construction, not by discipline — confirmed by `TestConcurrentCallsNoRace` under `-race`.
 
 In practice, per `docs/implementation-brief.md` ("Polling daemon... No bidirectional sync"), the engine calls this client serially within one `RunOnce` pass, so concurrency safety is a free property rather than a load-bearing requirement — matching the identical conclusion reached for the Readest client in Phase 4 (§8).
 
@@ -414,96 +402,42 @@ In practice, per `docs/implementation-brief.md` ("Polling daemon... No bidirecti
 
 ## 13. Timeouts, body-size limits, and resource ownership
 
-- **Per-call deadline:** `Client` applies `context.WithTimeout(ctx, c.timeout)` at the top of each exported method when `c.timeout > 0`, exactly as `readest.Client.PullBooks` does. Default value comes from `config.Bridge.HTTPTimeout` (30s), same source Phase 4 used, threaded through at the CLI wiring layer (main.go — see §16.6, cannot confirm exact current wiring from provided sources).
+- **Per-call deadline:** `Client` applies `context.WithTimeout(ctx, c.timeout)` at the top of each exported method when `c.timeout > 0`, exactly as `readest.Client.PullBooks` does. The default value comes from `config.Bridge.HTTPTimeout` (30s), threaded through at the CLI wiring layer (`cmd/bridge/main.go`, where `boClient := bookorbit.NewClient(..., cfg.Bridge.HTTPTimeout)`).
 - **Body-size cap:** `c.maxBody`, enforced client-side after encoding, before dispatch (§8.3), sourced from `config.Bridge.MaxBodyBytes` (900×1024).
 - **Error-body read cap:** a package-local `maxErrorBodyBytes = 512` constant, matching Phase 3/4's bound on how much of a non-2xx body is read into a wrapped error message.
-- **Response-body read cap:** unlike `readest.Client.decodeBooks` (4 MiB, because a full library pull can be large), BookOrbit's responses here (`match-check`, `bulk-progress`, `auth`, singular PUT) are all small, bounded acknowledgments — a generous but much smaller cap (e.g. 256 KiB) is sufficient and prevents a misbehaving server from flooding memory. Exact value is a Phase 5 implementation detail, not architecturally significant; flagged for confirmation at implementation time rather than fixed here.
+- **Response-body read cap:** unlike `readest.Client.decodeBooks` (4 MiB, because a full library pull can be large), BookOrbit's responses here (`match-check`, `bulk-progress`, `auth`, singular PUT) are all small, bounded acknowledgments — a `maxResponseBodyBytes = 256 KiB` cap is generous headroom while still preventing a misbehaving server from flooding memory.
 - **Ownership:** the `http.Client`/`Doer` itself (its own transport-level timeout, connection pooling, TLS config) is owned by whoever constructs the `httpclient.Doer` passed into `NewClient` — i.e., the CLI wiring layer, not this package. This package only owns the *per-call* deadline layered on top, same split as Phase 4.
 
 ---
 
-## 14. Complete unit-test matrix
+## 14. Unit-test coverage
 
-Mirrors the Phase 4 harness style: a scriptable `stubDoer` (reusable pattern already established in `auth_test.go`/`client_test.go` for `readest`), no real network, an injectable clock for `DeviceTime` assertions.
+Mirrors the Phase 4 harness style: a scriptable `stubDoer` (the same reusable pattern established in `internal/readest`'s `auth_test.go`/`client_test.go`), no real network, an injectable clock for `DeviceTime` assertions. The full suite lives in `internal/bookorbit/client_test.go` (client behavior) and `internal/bookorbit/models_test.go` (wire-shape assertions), and includes:
 
-### `Auth()`
-1. Success (200, any/empty body) → nil error.
-2. 401 → `ErrUnauthorized`.
-3. 403 → `ErrUnauthorized`.
-4. Network error → `ErrNetwork`, wraps underlying message.
-5. Headers: `x-auth-user`, `x-auth-key`, `accept` present; no `Content-Type`/`Content-Length` (GET, no body).
-6. Method/path: `GET /koreader/users/auth`.
-
-### `MatchCheck()`
-7. Success with `matches` + `unmatched` + `libraryVersion` → all three decoded correctly.
-8. Success with `matches`/`unmatched` absent or `null` → both normalize to non-nil empty slices.
-9. Request shape: `hashes` and `books` always serialize as `[]`, never `null`, even for a nil/empty input slice.
-10. Device fields (`deviceId`, `deviceModel`, `pluginVersion`, `deviceTime`) present at the top level of the request body, sibling to `hashes`/`books` (not nested).
-11. `DeviceTime` reflects `c.now()` at call time, overwriting any value the caller pre-populated (freshness test, §7.4).
-12. `MetadataAmbiguous` round-trips correctly for both `true` and `false` candidates.
-13. Headers: `x-auth-user`/`x-auth-key`/`accept`/`Content-Type: application/json` present; `Content-Length` matches encoded body length (verified via Go's `net/http` auto-computation, not manually set).
-14. 401/403 → `ErrUnauthorized`.
-15. 400 → `ErrBadRequest`.
-16. 404 → `ErrUnsupportedEndpoint`.
-17. 405 → `ErrUnsupportedEndpoint`.
-18. 429 → `ErrRateLimited`.
-19. 500/502/503 → `ErrServer`.
-20. Transport error → `ErrNetwork`.
-21. 200 with invalid JSON → `ErrMalformedResponse`.
-22. Request body (after device-stamping + encoding) exceeds `maxBody` → `ErrBodyTooLarge`, **zero** HTTP calls made.
-23. `ctx` cancelled before dispatch → `context.Canceled` propagates untouched.
-24. Single-hash call (mirrors `bookorbit_book_sync.lua`'s one-book match-check shape) succeeds identically to a multi-hash call.
-
-### `BulkProgress()`
-25. Success → `(BulkProgressResponse{Unmatched: [...]}, nil)`.
-26. Request shape: `items` array present, device-wrapped, never `null` when empty.
-27. `unmatched` absent/`null` in response → normalizes to empty, no error, no nil-deref.
-28. 401/403 → `ErrUnauthorized`.
-29. 400 → `ErrBadRequest`.
-30. 404/405 → `ErrUnsupportedEndpoint`.
-31. 429 → `ErrRateLimited`.
-32. 5xx → `ErrServer`.
-33. Network error → `ErrNetwork`.
-34. 200 malformed JSON → `ErrMalformedResponse`.
-35. Body exceeds `maxBody` → `ErrBodyTooLarge`, no request sent.
-36. Empty `items` slice → client still sends the request faithfully (does not special-case zero items); documented as an engine-side responsibility to avoid calling with nothing to push.
-
-### `UpdateProgress()`
-37. Success → nil error.
-38. Request shape: PUT, snake-case-ish keys (`document`, `percentage`, `progress`, `device`, `device_id`, `timestamp`) — explicitly asserted to differ from the camelCase device-wrapper shape used elsewhere.
-39. No device-wrapper fields present (no `deviceId`/`pluginVersion`/`deviceTime` in this endpoint's body).
-40. `device`/`device_id` reflect the client's static `DeviceInfo`, overwriting caller-supplied values.
-41. `timestamp` passes through unmodified from the caller (not stamped by the client — it is domain data, not a freshness field).
-42. 401/403 → `ErrUnauthorized`.
-43. 404/405 → `ErrUnsupportedEndpoint`.
-44. Network error → `ErrNetwork`.
-
-### Cross-cutting
-45. `NewClient` with `nil` logger defaults to `slog.Default()`.
-46. `NewClient` with `timeout <= 0` disables the per-call deadline (falls through to whatever the `Doer` itself enforces).
-47. Per-call deadline test: a slow `stubDoer` response exceeding `timeout` yields `context.DeadlineExceeded`/`ErrNetwork`.
-48. Error messages bound the echoed body to `maxErrorBodyBytes` (long error bodies truncated).
-49. Concurrent calls to `MatchCheck`/`BulkProgress` from multiple goroutines (`-race`) — no data race, since `Client` holds no shared mutable state.
-50. Base-URL joining: client appends the endpoint path to `baseURL` as-is; it does **not** re-run `util.NormalizeBookOrbitURL` (that already happened in `config.finalize()`), so a client constructed with an unnormalized base is out of contract, not defended against here — matches `readest.Client`'s equivalent assumption.
+- **`Auth()`** — success; 401/403 → `ErrUnauthorized`; network error → `ErrNetwork`; required headers (`x-auth-user`, `x-auth-key`, `accept`, no `Content-Type` on a bodyless GET); method/path.
+- **`MatchCheck()`** — success decoding `matches`/`unmatched`/`libraryVersion`; `null`/absent fields normalizing to non-nil empty slices; `hashes`/`books` always encoding as `[]`, never `null`; device fields present at the top level and always overwritten with the client's own identity and current time even when the caller supplies stale values; `MetadataAmbiguous` passing through; headers including a `Content-Length` that matches the encoded body; the full status-code classification matrix (400/401/403/404/405/429/500/502/503); malformed JSON; body-too-large making zero HTTP calls; context cancellation propagating untouched; a single-hash call behaving identically to a multi-hash call.
+- **`BulkProgress()`** — success returning `(BulkProgressResponse{Unmatched}, nil)`; device-wrapped request shape with a non-null `items` array; `unmatched` absent/`null` normalizing to empty; the same error-classification matrix; body-too-large making zero calls; an empty `items` slice sent faithfully (the client does not special-case it — avoiding that call with nothing to push is the engine's job).
+- **`UpdateProgress()`** — success; the kosync snake_case-ish request shape asserted to differ from the camelCase device-wrapper shape used elsewhere, and to carry no `deviceId`/`pluginVersion`/`deviceTime` fields; `device`/`device_id` overwritten from the client's static identity even when the caller supplies different values; `timestamp` passed through unmodified (domain data, not a freshness field); 401/403/404/405/network classification.
+- **Cross-cutting** — `NewClient` with a `nil` logger defaulting to `slog.Default()`; `timeout <= 0` disabling the per-call deadline; a configured timeout being honored against a slow response; error messages bounding the echoed body to `maxErrorBodyBytes`; concurrent calls to `MatchCheck` under `-race` confirming no shared mutable state; base-URL joining appending the endpoint path to `baseURL` as-is (the client does not re-run `util.NormalizeBookOrbitURL` — that already happened in `config.finalize()`), matching `readest.Client`'s equivalent assumption.
 
 ---
 
-## 15. Documentation discrepancies, ambiguities, and assumptions
+## 15. Documentation discrepancies, ambiguities, and assumptions resolved during implementation
 
-1. **(Verified plugin source, required fix)** `BulkProgress` currently returns only `error`, discarding the response. The plugin's own sweep code reads `body.unmatched` off exactly this call. The interface must return `(BulkProgressResponse, error)`.
-2. **(Verified plugin source, required fix)** `MatchCandidate` is missing `MetadataAmbiguous`, populated by both real call sites.
-3. **(Verified plugin source, required fix)** `MatchCheckRequest` is missing the device wrapper (`deviceId`/`deviceModel`/`pluginVersion`/`deviceTime`) that `withDevice` applies to every match-check payload, not just bulk-progress.
-4. **(Verified plugin source, required fix)** `BulkProgressResponse.Updated` is speculative and unconfirmed by any provided source; no plugin code reads such a field from a bulk-progress response. Replace with the verified `Unmatched []string`.
-5. **(Bridge-specific design decision)** The client overwrites `DeviceID`/`DeviceModel`/`PluginVersion`/`DeviceTime` on every request immediately before encoding, rather than trusting whatever the caller populated via the `WithDevice`/`WithMatchCheck`/`WithUpdateProgress` helpers. Justified in §7.4 as faithfully reproducing the plugin's "stamp at dispatch time" behavior and eliminating staleness across a batched engine loop.
-6. **(Bridge-specific design decision)** `ErrBodyTooLarge` is a distinct, non-retryable sentinel, deliberately diverging from the plugin's own crude "any string error is transport-like, therefore retryable" classification (`isTransportError`), which appears to be an unintentional latent bug in the Lua reference rather than a deliberate choice.
-7. **(Bridge-specific design decision, inferred/extrapolated)** `ErrUnsupportedEndpoint` (404/405) as the trigger signal for a future bulk→singular-PUT fallback is extrapolated from the *annotations* exchange endpoint's `unsupported_server` fallback pattern in `bookorbit_sweep.lua` — no reference source shows this exact fallback for the progress endpoints specifically. Flagged so it is not mistaken for verified behavior.
-8. **(Assumption, Go-runtime detail, no live validation needed)** Go's `net/http` auto-computes `Content-Length` for `*bytes.Reader`/`*bytes.Buffer` request bodies, satisfying the plugin's explicit header-setting requirement without manual code. This is fully within our control to verify at implementation time via a unit test (§14 item 13), not an external unknown.
-9. **(Assumption, Go-runtime detail, no live validation needed)** Go's `encoding/json` encodes non-nil empty slices as `[]`; the client must simply ensure it never marshals a `nil` slice for `hashes`/`books`/`items`. Also fully within our control.
-10. **(Ambiguity)** Exact response-body read cap for `match-check`/`bulk-progress`/`auth`/`update-progress` is not architecturally significant (these are small acknowledgment bodies) and is left as an implementation-time constant rather than a design decision.
+1. **(Verified plugin source)** `BulkProgress` previously returned only `error`, discarding the response. The plugin's own sweep code reads `body.unmatched` off exactly this call. The interface now returns `(BulkProgressResponse, error)`.
+2. **(Verified plugin source)** `MatchCandidate` was missing `MetadataAmbiguous`, populated by both real call sites. Added.
+3. **(Verified plugin source)** `MatchCheckRequest` was missing the device wrapper (`deviceId`/`deviceModel`/`pluginVersion`/`deviceTime`) that `withDevice` applies to every match-check payload, not just bulk-progress. Added.
+4. **(Verified plugin source)** `BulkProgressResponse.Updated` was speculative and unconfirmed by any provided source; no plugin code reads such a field from a bulk-progress response. Replaced with the verified `Unmatched []string`.
+5. **(Implemented, bridge-specific design decision)** The client overwrites `DeviceID`/`DeviceModel`/`PluginVersion`/`DeviceTime` on every request immediately before encoding, rather than trusting whatever the caller populated via the `WithDevice`/`WithMatchCheck`/`WithUpdateProgress` helpers. This faithfully reproduces the plugin's "stamp at dispatch time" behavior and eliminates staleness across a batched engine loop; pinned by `TestMatchCheckDeviceFieldsStampedAtTopLevel` and `TestUpdateProgressOverridesCallerDeviceFields`.
+6. **(Implemented, bridge-specific design decision)** `ErrBodyTooLarge` is a distinct, non-retryable sentinel, deliberately diverging from the plugin's own crude "any string error is transport-like, therefore retryable" classification (`isTransportError`), which appears to be an unintentional latent bug in the Lua reference rather than a deliberate choice.
+7. **(Implemented, bridge-specific design decision, extrapolated)** `ErrUnsupportedEndpoint` (404/405) as the trigger signal for a future bulk→singular-PUT fallback is extrapolated from the *annotations* exchange endpoint's `unsupported_server` fallback pattern in `bookorbit_sweep.lua` — no reference source shows this exact fallback for the progress endpoints specifically. Recorded here so it is not mistaken for verified behavior; the fallback *policy* itself is still Phase 6's to design.
+8. **(Verified implementation)** Go's `net/http` auto-computes `Content-Length` for `*bytes.Reader` request bodies, satisfying the plugin's explicit header-setting requirement without manual code. Confirmed by `TestMatchCheckHeaders`.
+9. **(Verified implementation)** Go's `encoding/json` encodes non-nil empty slices as `[]`; the client normalizes `Hashes`/`Books`/`Items` before marshaling so a caller-supplied `nil` never reaches the wire as `null`. Confirmed by `TestMatchCheckEmptySlicesEncodeAsArrayNotNull` and the bulk-progress equivalent.
+10. **(Implementation detail, not architecturally significant)** The response-body read cap for `match-check`/`bulk-progress`/`auth`/`update-progress` is `maxResponseBodyBytes = 256 KiB`, a package-local constant — these are small acknowledgment bodies, not full library pages.
 
 ---
 
-## 16. Live-validation items (cannot be determined from source)
+## 16. Live-validation items (cannot be determined from source; unaffected by this implementation)
 
 1. Whether a real `bulk-progress` response ever carries fields beyond `unmatched` (would justify restoring some form of an `updated`/count field with actual evidence).
 2. Whether `GET /koreader/users/auth`'s response body carries any usable fields, or is genuinely just `{}`/whatever-truthy on success.
@@ -513,60 +447,65 @@ Mirrors the Phase 4 harness style: a scriptable `stubDoer` (reusable pattern alr
 6. Whether `device_id`/`device` on the singular PUT endpoint have any server-side validation (e.g., rejecting an empty string) that could turn an edge case into a 400.
 7. The exact numeric values of `socketutil.LARGE_BLOCK_TIMEOUT`/`LARGE_TOTAL_TIMEOUT` (module not present in the provided source), which would confirm whether BookOrbit's own KOReader plugin gives itself materially more headroom than the bridge's default 30s.
 
+None of these affect the client's correctness as implemented; they inform tuning and Phase 6's fallback-trigger design.
+
 ---
 
-## 17. Proposed package layout
+## 17. Package layout (as implemented)
 
 ```
 internal/bookorbit/
-  doc.go            (package doc; drop "stub" language once implemented)
+  doc.go            (package doc)
   client.go          (Client, NewClient, all four methods, sentinel errors, helpers)
-  client_test.go     (new — the §14 matrix, stubDoer pattern reused from internal/readest)
-  models.go          (extended: MatchCandidate.MetadataAmbiguous, MatchCheckRequest device
-                       fields + WithMatchCheck, BulkProgressResponse.Unmatched,
+  client_test.go     (full unit-test matrix; stubDoer pattern reused from internal/readest)
+  models.go          (MatchCandidate.MetadataAmbiguous, MatchCheckRequest device fields +
+                       WithMatchCheck, BulkProgressResponse.Unmatched,
                        UpdateProgressRequest + WithUpdateProgress)
-  models_test.go     (extended: assert MetadataAmbiguous round-trips, assert MatchCheckRequest
-                       device fields present; TestClientStubReturnsNotImplemented removed)
+  models_test.go     (asserts MetadataAmbiguous round-trips, MatchCheckRequest device
+                       fields present, BulkProgressResponse decoding, UpdateProgressRequest
+                       wire shape)
 ```
 
-No new files beyond `client_test.go`; no subpackage — `internal/bookorbit` stays flat, matching the precedent set by keeping `internal/readest` flat through Phases 3–4 (same reasoning: the types are only consumed by this package and the future engine, and a split would be churn without benefit).
+No subpackage — `internal/bookorbit` stays flat, matching the precedent set by keeping `internal/readest` flat through Phases 3–4 (the types are only consumed by this package and the engine, and a split would be churn without benefit).
 
 ---
 
-## 18. Files that will be modified or created
+## 18. Files modified or created
 
-**Modify:**
+**Modified:**
 - `internal/bookorbit/models.go` — §4.2 additions/corrections.
-- `internal/bookorbit/client.go` — implement all four methods; add sentinel error block; add `timeout`/`now` fields; remove `ErrNotImplemented` once no method returns it.
-- `internal/bookorbit/models_test.go` — remove `TestClientStubReturnsNotImplemented`; extend `TestMatchCheckRequestShape` (or add a sibling test) to cover the new device fields and `MetadataAmbiguous`.
-- `cmd/bridge/main.go` — **assumption flagged, not verified**: the provided sources do not include `main.go`, so I cannot confirm whether it already constructs a `bookorbit.Client`. If it does, the call site needs the new `timeout` constructor argument (pending §20-D). This must be checked at implementation time rather than assumed.
+- `internal/bookorbit/client.go` — implemented all four methods; sentinel error block; `timeout`/`now` fields; the Phase 2 foundation's `ErrNotImplemented` was removed once no method returned it (`internal/sync/engine.go` has its own distinct `sync.ErrNotImplemented`, unaffected).
+- `internal/bookorbit/models_test.go` — removed `TestClientStubReturnsNotImplemented`; extended coverage for the new device fields and `MetadataAmbiguous`.
+- `cmd/bridge/main.go` — the `bookorbit.NewClient(...)` call site was updated with the new trailing `timeout` argument, sourced from `cfg.Bridge.HTTPTimeout`, matching how `readest.NewClient` is already wired.
 
-**Create:**
-- `internal/bookorbit/client_test.go` — the full §14 matrix.
+**Created:**
+- `internal/bookorbit/client_test.go` — the full unit-test matrix (§14).
 
 ---
 
-## 19. Public API changes
+## 19. Public API — net changes from the Phase 2 foundation
 
-- `API.BulkProgress` signature changes from `(ctx, req) error` to `(ctx, req) (BulkProgressResponse, error)` — **breaking**, but nothing in the codebase yet depends on the old signature (only the stub itself and its own test).
-- `API` gains `UpdateProgress(ctx, req UpdateProgressRequest) error` — additive.
-- `MatchCandidate` gains `MetadataAmbiguous bool` — additive.
-- `MatchCheckRequest` gains `DeviceID`/`DeviceModel`/`PluginVersion`/`DeviceTime` — additive (existing callers that don't set them get empty strings, then the client overwrites them anyway per §7.4).
-- `BulkProgressResponse.Updated` is removed and replaced by `Unmatched []string` — **breaking**, but again nothing depends on the old field.
+- `API.BulkProgress` signature changed from `(ctx, req) error` to `(ctx, req) (BulkProgressResponse, error)` — breaking, but nothing in the codebase depended on the old signature besides the stub itself and its own test.
+- `API` gained `UpdateProgress(ctx, req UpdateProgressRequest) error` — additive.
+- `MatchCandidate` gained `MetadataAmbiguous bool` — additive.
+- `MatchCheckRequest` gained `DeviceID`/`DeviceModel`/`PluginVersion`/`DeviceTime` — additive.
+- `BulkProgressResponse.Updated` was removed and replaced by `Unmatched []string` — breaking, but nothing depended on the old field.
 - New exported sentinel errors: `ErrUnauthorized`, `ErrBadRequest`, `ErrUnsupportedEndpoint`, `ErrRateLimited`, `ErrServer`, `ErrNetwork`, `ErrMalformedResponse`, `ErrBodyTooLarge`.
-- `ErrNotImplemented` is removed from `internal/bookorbit` once no method returns it (confirmed unused elsewhere — `internal/sync/engine.go` has its own distinct `sync.ErrNotImplemented`, not this one).
-- `NewClient` gains a `timeout time.Duration` parameter — pending approval (§20-D).
+- `ErrNotImplemented` was removed from `internal/bookorbit` (no method returns it anymore).
+- `NewClient` gained a `timeout time.Duration` parameter, wired through from `cmd/bridge/main.go`.
 
 ---
 
-## 20. Explicit decisions requiring approval before implementation
+## 20. Status
 
-- **A.** `BulkProgress` return-type fix (`error` → `(BulkProgressResponse, error)`). Recommended as effectively mandatory — confirm.
-- **B.** `MatchCheckRequest`/`MatchCandidate`/`BulkProgressResponse` model corrections in §4.2(a–c). Recommended, verified gaps — confirm.
-- **C.** Add `UpdateProgress` now, in Phase 5, per the roadmap's explicit call-out — vs. deferring the whole method to Phase 6 alongside its fallback policy. Recommend implementing the endpoint now, policy later.
-- **D.** Add a `timeout time.Duration` constructor parameter, honored as a per-call deadline (mirrors Phase 4 Decision D) — vs. relying solely on the injected `Doer`'s own timeout.
-- **E.** Client overwrites device-wrapper fields (`DeviceID`/`DeviceModel`/`PluginVersion`/`DeviceTime`) on every request at send time, ignoring whatever the caller populated. Recommended per §7.4/§15.5 — confirm, since it means `WithDevice`/`WithMatchCheck`/`WithUpdateProgress` become convenience-only rather than load-bearing.
-- **F.** Error taxonomy naming and the specific inclusion of `ErrUnsupportedEndpoint` (404/405) as a distinct sentinel for future fallback-trigger use, despite no direct reference precedent for this exact endpoint pair (§15.7) — confirm the extrapolation is acceptable.
-- **G.** `ErrBodyTooLarge`'s classification as strictly non-retryable, deliberately diverging from the plugin's own (likely buggy) treatment of `"body_too_large"` as retryable — confirm the deviation.
+Implemented and accepted. All decisions previously flagged for approval in this design were resolved as follows and are now load-bearing in the shipped code, not open questions:
 
-Stopping here as instructed — awaiting approval before any Phase 5 implementation.
+- `BulkProgress` returns `(BulkProgressResponse, error)`.
+- The §4.2(a–c) model corrections are in place.
+- `UpdateProgress` is implemented now; the fallback *policy* (when to use it instead of `BulkProgress`) is deferred to Phase 6, per the roadmap.
+- `NewClient` takes a `timeout time.Duration`, honored as a per-call deadline.
+- The client overwrites the device-wrapper fields on every request at send time; `WithDevice`/`WithMatchCheck`/`WithUpdateProgress` are convenience constructors only.
+- `ErrUnsupportedEndpoint` (404/405) exists as its own sentinel for Phase 6's future fallback-trigger use.
+- `ErrBodyTooLarge` is classified as strictly non-retryable, a deliberate divergence from the plugin's own (likely buggy) treatment of `"body_too_large"` as retryable.
+
+Phase 6 (the sync engine) is next.
