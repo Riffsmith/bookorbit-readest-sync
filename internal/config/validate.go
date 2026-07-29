@@ -1,7 +1,7 @@
 package config
 
 import (
-	"github.com/user/bookorbit-readest-sync/internal/util"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util"
 )
 
 // normalizeServerURL delegates to the shared util implementation so the

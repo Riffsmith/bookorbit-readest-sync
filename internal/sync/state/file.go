@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/user/bookorbit-readest-sync/internal/token"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/token"
 )
 
 // filePerm is the on-disk permission for the state file. It holds credentials

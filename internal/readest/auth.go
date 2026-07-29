@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/user/bookorbit-readest-sync/internal/sync/state"
-	"github.com/user/bookorbit-readest-sync/internal/token"
-	"github.com/user/bookorbit-readest-sync/internal/util/httpclient"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/sync/state"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/token"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util/httpclient"
 )
 
 // Sentinel errors for the authentication lifecycle. Each is returned wrapped

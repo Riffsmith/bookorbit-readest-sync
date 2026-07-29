@@ -11,7 +11,7 @@ package state
 import (
 	"errors"
 
-	"github.com/user/bookorbit-readest-sync/internal/token"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/token"
 )
 
 // ErrNotFound is returned when a requested match record is not in the cache.

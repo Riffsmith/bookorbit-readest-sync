@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/user/bookorbit-readest-sync/internal/util/httpclient"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util/httpclient"
 )
 
 // maxResponseBodyBytes bounds how much of a pull response body is read into

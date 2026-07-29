@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/user/bookorbit-readest-sync/internal/sync/state"
-	"github.com/user/bookorbit-readest-sync/internal/token"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/sync/state"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/token"
 )
 
 // stubDoer is a scriptable httpclient.Doer. Each queued step is invoked in

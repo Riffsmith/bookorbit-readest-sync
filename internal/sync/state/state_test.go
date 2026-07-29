@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/user/bookorbit-readest-sync/internal/token"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/token"
 )
 
 // exerciseStore runs the common Store contract against any implementation.

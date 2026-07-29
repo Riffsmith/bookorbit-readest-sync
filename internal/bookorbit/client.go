@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/user/bookorbit-readest-sync/internal/util/httpclient"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util/httpclient"
 )
 
 // maxErrorBodyBytes bounds how much of a non-2xx response body is read into a

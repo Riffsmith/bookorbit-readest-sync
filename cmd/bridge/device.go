@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"fmt"
 
-	"github.com/user/bookorbit-readest-sync/internal/config"
-	"github.com/user/bookorbit-readest-sync/internal/sync/state"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/config"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/sync/state"
 )
 
 // resolveDeviceID determines the stable BookOrbit device identity for this

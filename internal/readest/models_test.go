@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/user/bookorbit-readest-sync/internal/util"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util"
 )
 
 func TestBookRowPredicates(t *testing.T) {

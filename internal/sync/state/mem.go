@@ -3,7 +3,7 @@ package state
 import (
 	"sync"
 
-	"github.com/user/bookorbit-readest-sync/internal/token"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/token"
 )
 
 // MemStore is an in-memory Store for tests and ephemeral runs. It satisfies

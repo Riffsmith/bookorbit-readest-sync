@@ -6,10 +6,9 @@
 //	bridge --config bridge.yaml --once     run a single sync pass and exit
 //	bridge --daemon --config bridge.yaml   explicit daemon mode
 //
-// In this foundation phase the CLI loads and validates configuration, builds
-// the logger, opens the state store, and wires the (stub) clients and engine,
-// but performs no network sync. Running a sync pass reports that the engine is
-// not yet implemented, which is the expected behavior until Phase 6.
+// The CLI loads and validates configuration, builds the logger, opens the
+// state store, wires the Readest/BookOrbit clients and sync engine, and then
+// runs a single sync pass (--once) or a continuous poll loop (default).
 package main
 
 import (
@@ -21,13 +20,13 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/user/bookorbit-readest-sync/internal/bookorbit"
-	"github.com/user/bookorbit-readest-sync/internal/config"
-	"github.com/user/bookorbit-readest-sync/internal/logger"
-	"github.com/user/bookorbit-readest-sync/internal/readest"
-	"github.com/user/bookorbit-readest-sync/internal/sync"
-	"github.com/user/bookorbit-readest-sync/internal/sync/state"
-	"github.com/user/bookorbit-readest-sync/internal/util/httpclient"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/bookorbit"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/config"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/logger"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/readest"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/sync"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/sync/state"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util/httpclient"
 )
 
 // version is the build version, overridable at link time via -ldflags.
@@ -77,8 +76,9 @@ func run(argv []string) error {
 		return fmt.Errorf("load state: %w", err)
 	}
 
-	// Wire the (stub) clients and engine. None of these perform network I/O in
-	// the foundation phase.
+	// Wire the Readest/BookOrbit clients and engine. None of these perform
+	// network I/O on construction; the first network call happens inside
+	// engine.RunOnce/Run.
 	deviceID := resolveDeviceID(cfg, st)
 	httpDoer := httpclient.New(cfg.Bridge.HTTPTimeout)
 	rdAuth := readest.NewAuth(cfg.Readest.SupabaseURL, cfg.Readest.SupabaseAnonKey, cfg.Readest.Email, cfg.Readest.Password, st, httpDoer, log)
@@ -113,20 +113,11 @@ func run(argv []string) error {
 	}()
 
 	if *once {
-		runErr := engine.RunOnce(ctx)
-		if errors.Is(runErr, sync.ErrNotImplemented) {
-			log.Info("sync engine not implemented yet (foundation phase); nothing to do")
-			return nil
-		}
-		return runErr
+		return engine.RunOnce(ctx)
 	}
 
 	// Daemon mode (default).
 	runErr := engine.Run(ctx)
-	if errors.Is(runErr, sync.ErrNotImplemented) {
-		log.Info("sync engine not implemented yet (foundation phase); nothing to do")
-		return nil
-	}
 	if errors.Is(runErr, context.Canceled) {
 		log.Info("shutdown requested; exiting")
 		return nil

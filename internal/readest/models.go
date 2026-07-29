@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/user/bookorbit-readest-sync/internal/util"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util"
 )
 
 // DummyHash is the sentinel book hash the Readest server emits on an initial
