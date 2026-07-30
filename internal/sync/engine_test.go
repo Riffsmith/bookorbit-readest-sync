@@ -219,7 +219,7 @@ func TestRunOnceFreshMatchAlwaysPushes(t *testing.T) {
 		t.Fatalf("matchCalls=%d bulkCalls=%d, want 1,1", bo.matchCalls, bo.bulkCalls)
 	}
 	// Design §12 case 3: a fresh, unmatched row must build a MatchCandidate
-	// with the bridge-specific values from §6.2 (Source="readest",
+	// with the bridge-specific values from §6.2 (Source="file",
 	// MetadataAmbiguous=false, LastOpen = updated_at in Unix seconds).
 	if len(bo.matchReq.Books) != 1 {
 		t.Fatalf("matchReq.Books len = %d, want 1", len(bo.matchReq.Books))
@@ -228,8 +228,8 @@ func TestRunOnceFreshMatchAlwaysPushes(t *testing.T) {
 	if cand.Hash != "h1" {
 		t.Errorf("candidate Hash = %q, want h1", cand.Hash)
 	}
-	if cand.Source != "readest" {
-		t.Errorf("candidate Source = %q, want readest", cand.Source)
+	if cand.Source != "file" {
+		t.Errorf("candidate Source = %q, want file", cand.Source)
 	}
 	if cand.MetadataAmbiguous {
 		t.Error("candidate MetadataAmbiguous should be false for a headless bridge")
@@ -372,6 +372,73 @@ func TestRunOnceUnmatchedPastCooldownRechecks(t *testing.T) {
 
 	// Design §12 case 8 trailing: the next RunOnce, now within the freshly
 	// established cooldown, must not recheck.
+	bo.matchCalls = 0
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if bo.matchCalls != 0 {
+		t.Errorf("matchCalls = %d after recheck, want 0 (now within cooldown)", bo.matchCalls)
+	}
+}
+
+func TestRunOnceAbsentFromMatchResponseIsUnmatchedNotFailure(t *testing.T) {
+	// Phase 6 ADR Addendum 2 regression guard: a hash the live BookOrbit
+	// server returns in neither resp.Matches nor resp.Unmatched (the common
+	// case for Readest-owned books BookOrbit's library has never seen) must
+	// be treated as unmatched per bookorbit_sweep.lua:328-332, not as a
+	// batch-level failure. The pre-fix engine appended the row's
+	// WatermarkMs to failedWatermarks, which retreated the watermark to
+	// min-1 forever and produced a per-poll WARN storm; the fix routes
+	// this case through SetUnmatched + DeleteMatch, lets the watermark
+	// advance to the row's own WatermarkMs, and settles the hash into the
+	// UnmatchedCooldown recheck gate.
+	row := mkRow("h1", 50, 100, "2026-01-02T00:00:00Z")
+	rd := &fakeReadest{rows: []readest.BookRow{row}}
+	// matchResp left zero-valued: both Matches and Unmatched are empty, so
+	// "h1" is absent from both response lists. This is the live-server
+	// behavior the original §6.3 contract mischaracterized as "defensive."
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	// No prior MatchRecord, no prior UnmatchedAt — a brand-new Readest
+	// row the engine has never classified. This is the canonical entry
+	// point to the match-check phase (engine.go case state.ErrNotFound).
+	e := newTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if bo.matchCalls != 1 {
+		t.Errorf("matchCalls = %d, want 1 (fresh hash, no prior UnmatchedAt)", bo.matchCalls)
+	}
+	if bo.bulkCalls != 0 {
+		t.Errorf("bulkCalls = %d, want 0 (no push for unmatched)", bo.bulkCalls)
+	}
+	// The hash must now be in the unmatched cache with a fresh timestamp.
+	at, ok := st.UnmatchedAt("h1")
+	if !ok {
+		t.Fatal("absent-from-both hash should be SetUnmatched, got no UnmatchedAt")
+	}
+	if at == 0 {
+		t.Error("fresh Unmatched timestamp should be non-zero")
+	}
+	// Defensive: no MatchRecord should exist for this hash. (It never did,
+	// but this asserts DeleteMatch was a safe no-op, not a skipped call.)
+	if _, merr := st.Match("h1"); !errors.Is(merr, state.ErrNotFound) {
+		t.Errorf("absent-from-both path must leave no MatchRecord, got Match err = %v", merr)
+	}
+	// Watermark advances to the row's own WatermarkMs (no retreat). The
+	// pre-fix bug retreated to WatermarkMs-1 via failedWatermarks; asserting
+	// equality catches any regression by exactly 1ms.
+	want := row.WatermarkMs()
+	if got := st.Watermark(); got != want {
+		t.Errorf("watermark = %d, want %d (advance, not retreat; old bug retreated to %d)",
+			got, want, want-1)
+	}
+
+	// Second RunOnce within the freshly established cooldown must not
+	// resubmit the same hash to match-check — it settles into the
+	// UnmatchedCooldown recheck gate (24h default), eliminating the
+	// per-poll re-pull/re-match storm the old contract produced.
 	bo.matchCalls = 0
 	if err := e.RunOnce(context.Background()); err != nil {
 		t.Fatalf("second RunOnce: %v", err)

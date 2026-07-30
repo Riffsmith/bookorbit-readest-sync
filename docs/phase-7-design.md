@@ -6,6 +6,33 @@
 
 Phase 6 is treated as complete and correct. Nothing here revisits Phase 6's retry/watermark/fallback decisions (`docs/adr/phase-6-decision-record.md`) — this phase is strictly the executable shell around the already-verified engine.
 
+> **Phase 6 follow-up — RESOLVED 2026-07-30.** This document
+> previously carried a BLOCKED banner (recorded 2026-07-30 after the
+> first live run) for two Phase 6 issues the run surfaced: the
+> `MatchCandidate.Source` enum value (Addendum 1) and the "hash absent
+> from match-check response" handler (Addendum 2). Both have now been
+> fixed in `internal/sync/engine.go` per the Resolution record at the
+> end of `docs/adr/phase-6-decision-record.md`. In particular:
+>
+> - Match-check result handling now treats a hash absent from both
+>   `resp.Matches` and `resp.Unmatched` as **unmatched** (settled into
+>   the `UnmatchedCooldown` recheck gate, watermark advances normally),
+>   matching the reference plugin's `bookorbit_sweep.lua:328-332` and
+>   the verified live BookOrbit server's omission-based behavior. The
+>   pre-fix warning-storm and watermark-retreat are gone. A new
+>   regression test, `TestRunOnceAbsentFromMatchResponseIsUnmatchedNotFailure`,
+>   guards the corrected contract.
+> - `docs/phase-6-design.md` §6.3 bullet 3 has been rewritten to remove
+>   the stale "defensive — should not happen" wording and describe the
+>   verified behavior with a code citation.
+>
+> The two specific Phase 7 sections the blocker previously flagged are
+> now unblocked on their stated premises: §7.3's claim that the daemon's
+> state converges (and `Restart=on-failure` is essentially a safety net)
+> is now accurate; §8.2 item 9's call for `cmd/bridge` tests now sits
+> on top of an `engine_test.go` that does cover the absent-from-both
+> path. The rest of this Phase 7 design document is unchanged.
+
 ---
 
 ## 0. What already exists (verified against shipped code)

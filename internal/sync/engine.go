@@ -201,7 +201,7 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 					Title:             row.Title,
 					Authors:           row.Author,
 					LastOpen:          updatedSeconds(row, 0),
-					Source:            "readest",
+					Source:            "file",
 					MetadataAmbiguous: false,
 				}
 			}
@@ -234,15 +234,28 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 					}
 				}
 			}
+			// Per docs/adr/phase-6-decision-record.md Addendum 2: the live
+			// BookOrbit server does not echo unknown hashes in
+			// resp.Unmatched — it omits them from both lists. Any hash in
+			// the request that didn't appear in resp.Matches is therefore
+			// unmatched, exactly as the reference plugin treats it
+			// (bookorbit_sweep.lua:328-332: "if not matched[md5] then
+			// setUnmatched(md5)"). Hashes the server does return in
+			// resp.Unmatched get the same treatment; the two cases are
+			// semantically indistinguishable, so they share one loop that
+			// populates seen first, then marks any remaining chunk hash
+			// unmatched.
 			for _, h := range resp.Unmatched {
+				seen[h] = true
 				e.st.SetUnmatched(h, now.Unix())
 				e.st.DeleteMatch(h)
-				seen[h] = true
 			}
 			for _, h := range chunk {
 				if !seen[h] {
-					e.log.Warn("sync: hash absent from match-check response", "hash", h)
-					failedWatermarks = append(failedWatermarks, rowByHash[h].WatermarkMs())
+					seen[h] = true
+					e.st.SetUnmatched(h, now.Unix())
+					e.st.DeleteMatch(h)
+					e.log.Debug("sync: hash unmatched by bookorbit", "hash", h)
 				}
 			}
 			return true

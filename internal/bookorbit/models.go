@@ -9,7 +9,14 @@ type MatchCandidate struct {
 	Authors string `json:"authors"`
 	// LastOpen is a Unix epoch second timestamp, or 0 when unknown.
 	LastOpen int64 `json:"lastOpen"`
-	// Source identifies the origin of the candidate (e.g. "readest").
+	// Source identifies the origin of the candidate. The BookOrbit server
+	// validates this field against a fixed enum: "current_file", "file", or
+	// "statistics" (verified against the live server, see
+	// docs/adr/phase-6-decision-record.md). The bridge always sends "file":
+	// structurally it has hash + title + authors + lastOpen and nothing else,
+	// which is the same shape as bookorbit_catalog_download.lua:335's
+	// "file" candidate (a hash-resolvable metadata candidate that is neither
+	// the live open document nor a stats-DB row).
 	Source string `json:"source"`
 	// MetadataAmbiguous flags a candidate whose title/author metadata is
 	// uncertain (e.g. derived from an unreliable source). Both reference call

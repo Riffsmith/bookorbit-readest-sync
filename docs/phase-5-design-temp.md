@@ -190,7 +190,7 @@ Request:
 {
   "hashes": ["h1", "h2"],
   "books": [
-    { "hash": "h1", "title": "T", "authors": "A", "lastOpen": 1700000000, "source": "readest", "metadataAmbiguous": false }
+    { "hash": "h1", "title": "T", "authors": "A", "lastOpen": 1700000000, "source": "file", "metadataAmbiguous": false }
   ],
   "deviceId": "uuid-...",
   "deviceModel": "readest-bridge",

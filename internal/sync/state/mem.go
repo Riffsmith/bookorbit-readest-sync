@@ -89,8 +89,11 @@ func (s *MemStore) DeleteMatch(hash string) {
 	delete(s.data.Matches, hash)
 }
 
-// UnmatchedAt returns the last failed match-check time for a hash and whether
-// it is in the unmatched set.
+// UnmatchedAt returns the last time the engine recorded this hash as
+// unmatched by BookOrbit (whether the server returned it in
+// resp.Unmatched or omitted it from both response lists; see
+// docs/adr/phase-6-decision-record.md Addendum 2), and whether the
+// hash is currently in the unmatched set.
 func (s *MemStore) UnmatchedAt(hash string) (int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,7 +101,12 @@ func (s *MemStore) UnmatchedAt(hash string) (int64, bool) {
 	return at, ok
 }
 
-// SetUnmatched records a failed match-check at the given time.
+// SetUnmatched records the given Unix-second time as the most recent
+// match-check result that found no BookOrbit library match for this
+// hash (whether the server returned it in resp.Unmatched or omitted
+// it from both response lists; see docs/adr/phase-6-decision-record.md
+// Addendum 2). Such hashes settle into the UnmatchedCooldown recheck
+// gate so the engine does not re-submit them on every poll.
 func (s *MemStore) SetUnmatched(hash string, at int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -9,7 +9,7 @@ func TestMatchCheckRequestShape(t *testing.T) {
 	// The BookOrbit backend requires `books` as an array (not a keyed map).
 	req := MatchCheckRequest{
 		Hashes: []string{"h1"},
-		Books:  []MatchCandidate{{Hash: "h1", Title: "T", Authors: "A", LastOpen: 100, Source: "readest"}},
+		Books:  []MatchCandidate{{Hash: "h1", Title: "T", Authors: "A", LastOpen: 100, Source: "file"}},
 	}
 	raw, err := json.Marshal(req)
 	if err != nil {

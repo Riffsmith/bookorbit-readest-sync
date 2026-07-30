@@ -88,10 +88,17 @@ type Store interface {
 	// DeleteMatch removes a cached resolution (e.g., for a deleted book).
 	DeleteMatch(hash string)
 
-	// UnmatchedAt returns the last failed match-check time for a hash and
+	// UnmatchedAt returns the last time the engine recorded this hash as
+	// unmatched by BookOrbit (whether the server returned it in
+	// resp.Unmatched or omitted it from both response lists — the
+	// latter is the common case for books BookOrbit's library has never
+	// seen; see docs/adr/phase-6-decision-record.md Addendum 2), and
 	// whether the hash is currently in the unmatched set.
-	UnmatchedAt(hash string) (int64, bool)
-	// SetUnmatched records a failed match-check at the given time.
+	UnmatchedAt(hash string) (at int64, ok bool)
+	// SetUnmatched records the given Unix-second time as the most recent
+	// match-check result was "no BookOrbit library match for this hash."
+	// Such hashes settle into the UnmatchedCooldown recheck gate so the
+	// engine does not re-submit them on every poll.
 	SetUnmatched(hash string, at int64)
 	// ClearUnmatched removes a hash from the unmatched set (after it matches).
 	ClearUnmatched(hash string)
