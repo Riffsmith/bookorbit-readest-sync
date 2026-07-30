@@ -8,14 +8,16 @@ plugins that previously relayed it.
 Readest → Readest Sync → Standalone Bridge → BookOrbit
 ```
 
-> **Status: Phase 6 complete.** Foundation (config, logging, utilities, state
-> store), Readest Supabase auth + sync client, BookOrbit client, and the sync
-> engine are all implemented and unit-tested. The bridge can authenticate to
-> Readest, pull the books table, match-check against BookOrbit, and push
-> batched progress. What remains is packaging polish (Phase 7) and formal
-> integration-test validation against live servers (Phase 8) — see
-> `docs/implementation-roadmap.md`. Manual end-to-end runs against real
-> accounts work today (see "Testing against live accounts" below).
+> **Status: Phase 7 complete.** Foundation, Readest Supabase auth + sync
+> client, BookOrbit client, the sync engine, and the CLI/packaging layer
+> (help/exit-code handling, a startup connectivity probe, `cmd/bridge` unit
+> tests, a systemd unit, and cross-compiled release builds) are all
+> implemented and unit-tested. The bridge can authenticate to Readest, pull
+> the books table, match-check against BookOrbit, and push batched progress.
+> What remains is formal integration-test validation against live servers
+> (Phase 8) — see `docs/implementation-roadmap.md`. Manual end-to-end runs
+> against real accounts work today (see "Testing against live accounts"
+> below).
 
 ---
 
@@ -124,12 +126,29 @@ value; the bridge only relays it.
 ```sh
 bridge --config configs/bridge.yaml            # daemon (default)
 bridge --config configs/bridge.yaml --once     # single pass (cron/systemd timer)
+bridge --daemon --config configs/bridge.yaml   # daemon, explicitly (see note below)
 bridge --version
+bridge --help                                  # or -h; prints usage and exits 0
 ```
 
 `--once` runs a single sync pass and exits — the recommended mode for manual
 verification and for cron/systemd-timer deployments. The default daemon mode
-polls on `bridge.poll_interval`.
+polls on `bridge.poll_interval`; `--daemon` is accepted purely so an explicit
+invocation (e.g. a systemd unit's `ExecStart`) can self-document intent — it
+has no effect on control flow since daemon is already the default.
+
+At startup the bridge also performs a one-time, non-fatal BookOrbit
+connectivity check (`GET /koreader/users/auth`) and logs the result at `info`
+(success) or `warn` (failure). This exists purely to catch a mistyped
+`bookorbit.username`/`password`/`server_url` immediately instead of only
+after a full `poll_interval` has elapsed — it never blocks or fails startup;
+the engine's own retry/backoff already handles a genuine outage on every
+scheduled pass.
+
+Exit codes are deliberately simple: `0` for success, a clean `--version`/
+`--help`, or a graceful signal-driven shutdown; `1` for everything else
+(invalid config, corrupt state file, CLI usage errors, or a `--once` sync
+failure).
 
 ## Testing against live accounts
 
@@ -194,6 +213,7 @@ make test      # unit tests
 make vet       # go vet
 make fmt       # gofmt -s
 make tidy      # go mod tidy
+make release   # cross-compile static linux/amd64 + linux/arm64 binaries into bin/
 ```
 
 ### Layout
@@ -210,6 +230,7 @@ make tidy      # go mod tidy
 | `internal/sync` | Orchestration engine: pull → diff → match → push, watermark, retry/backoff |
 | `internal/sync/state` | Persistent state store (file + in-memory): tokens, match cache, watermark, device id |
 | `configs` | Example configuration |
+| `systemd` | Example hardened systemd unit (`bridge.service`) |
 | `docs` | Specs, reverse-engineering report, roadmap |
 | `reference` | Read-only KOReader plugins used as the spec |
 
@@ -223,13 +244,52 @@ make tidy      # go mod tidy
 - State is the only persistence; it is written atomically with `0600`
   permissions because it holds tokens.
 
+## Deployment
+
+### systemd
+
+A ready-to-adapt unit file is at `systemd/bridge.service`. It runs the bridge
+as an unprivileged service user, restarts on failure, and applies standard
+sandboxing (`ProtectSystem=strict`, `PrivateTmp`, `ProtectHome`,
+`NoNewPrivileges`) scoped to the bridge's own state directory.
+
+```sh
+sudo useradd --system --home /var/lib/bridge --shell /usr/sbin/nologin bridge
+sudo mkdir -p /var/lib/bridge /etc/bridge
+sudo cp bin/bridge-linux-amd64 /usr/local/bin/bridge   # or -linux-arm64
+sudo cp configs/bridge.example.yaml /etc/bridge/bridge.yaml   # then edit
+sudo chown -R bridge:bridge /var/lib/bridge /etc/bridge
+sudo cp systemd/bridge.service /etc/systemd/system/bridge.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now bridge
+```
+
+Prefer putting secrets (`BRIDGE_READEST_PASSWORD`, `BRIDGE_BOOKORBIT_PASSWORD`,
+etc.) in `/etc/bridge/bridge.env` (referenced by the unit's
+`EnvironmentFile=`) rather than in `bridge.yaml`, so they never need to sit in
+a config file on disk. Restart the service after changing either file.
+
+Since daemon mode's own retry/backoff already absorbs transient Readest/
+BookOrbit outages (see `internal/sync/engine.go`), `systemctl`'s restart
+count should stay at zero in normal operation — watch the `warn`-level log
+volume (`journalctl -u bridge`), not the restart count, to notice a
+persistent problem.
+
+### Release builds
+
+`make release` cross-compiles static binaries for `linux/amd64` and
+`linux/arm64` into `bin/` (no CGO, stripped, version-embedded via
+`-ldflags`), matching the systemd/Docker deployment targets this project is
+built for. A container image is not published yet — a minimal `FROM scratch`
+image built from one of these binaries is a trivial follow-on with no code
+changes, deferred until there's real demand for it.
+
 ## Roadmap
 
-See `docs/implementation-roadmap.md`. Phases 0–6 are complete (foundation,
+See `docs/implementation-roadmap.md`. Phases 0–7 are complete (foundation,
 config/utilities/logging/state, Readest auth + sync client, BookOrbit client,
-sync engine). Remaining: Phase 7 (CLI/packaging polish, systemd unit,
-Makefile) and Phase 8 (formal integration-test validation against live
-servers) — both suitable as follow-ups now that Phase 6 is in place.
+sync engine, CLI/packaging). Remaining: Phase 8 (formal integration-test
+validation against live servers).
 
 ## License
 

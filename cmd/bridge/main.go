@@ -16,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,15 +34,21 @@ import (
 var version = "0.1.0-dev"
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		// Errors are reported here so run() stays testable.
 		fmt.Fprintf(os.Stderr, "bridge: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(argv []string) error {
+// run executes the CLI end to end and returns the first fatal error, or nil
+// on success — which includes a graceful signal-driven shutdown, --version,
+// and -h/--help. stdout/stderr are injected so tests can capture CLI output
+// without touching the process's real streams; main() always calls this with
+// the real os.Stdout/os.Stderr, so production behavior is unchanged.
+func run(argv []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("bridge", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	var (
 		configPath  = fs.String("config", "configs/bridge.yaml", "path to the config file")
 		once        = fs.Bool("once", false, "run a single sync pass and exit")
@@ -49,10 +56,15 @@ func run(argv []string) error {
 		showVersion = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(argv); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// -h/--help already printed usage via fs.Usage(); by Unix
+			// convention this is a successful invocation, not a failure.
+			return nil
+		}
 		return err
 	}
 	if *showVersion {
-		fmt.Println(version)
+		fmt.Fprintln(stdout, version)
 		return nil
 	}
 
@@ -62,13 +74,13 @@ func run(argv []string) error {
 	if err != nil {
 		if errors.Is(err, config.ErrNoConfigFile) {
 			// Non-fatal: note it on the logger once it exists.
-			fmt.Fprintf(os.Stderr, "bridge: warning: %v; using defaults and environment\n", err)
+			fmt.Fprintf(stderr, "bridge: warning: %v; using defaults and environment\n", err)
 		} else {
 			return err
 		}
 	}
 
-	log := logger.New(os.Stderr, cfg.Bridge.LogLevel, cfg.Bridge.LogFormat)
+	log := logger.New(stderr, cfg.Bridge.LogLevel, cfg.Bridge.LogFormat)
 
 	// Open the persistent state store. Loading a missing file is fine.
 	st := state.NewFileStore(cfg.Bridge.StateFile)
@@ -112,11 +124,26 @@ func run(argv []string) error {
 		}
 	}()
 
+	// One-time BookOrbit connectivity probe. This is never fatal: a bad
+	// BookOrbit credential or an unreachable server is already handled by
+	// the engine's own retry/backoff and "log and continue" policy on every
+	// scheduled pass (internal/sync/engine.go). The probe exists only to
+	// give an operator immediate, visible feedback on the most common
+	// first-run mistake (wrong bookorbit.username/password/server_url)
+	// instead of discovering it only after poll_interval has elapsed.
+	if err := boClient.Auth(ctx); err != nil {
+		log.Warn("bookorbit connectivity check failed; sync will retry on schedule", "error", err)
+	} else {
+		log.Info("bookorbit connectivity check passed")
+	}
+
 	if *once {
 		return engine.RunOnce(ctx)
 	}
 
-	// Daemon mode (default).
+	// Daemon mode (default). --daemon is accepted purely so an explicit
+	// invocation (e.g. a systemd ExecStart line) can self-document intent;
+	// it has no effect on control flow since daemon is already the default.
 	runErr := engine.Run(ctx)
 	if errors.Is(runErr, context.Canceled) {
 		log.Info("shutdown requested; exiting")

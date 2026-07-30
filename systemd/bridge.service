@@ -1,0 +1,55 @@
+# Systemd unit for the Readest -> BookOrbit sync bridge.
+#
+# Install:
+#   sudo useradd --system --home /var/lib/bridge --shell /usr/sbin/nologin bridge
+#   sudo mkdir -p /var/lib/bridge /etc/bridge
+#   sudo cp bin/bridge-linux-amd64 /usr/local/bin/bridge   # or -linux-arm64
+#   sudo cp configs/bridge.example.yaml /etc/bridge/bridge.yaml   # then edit
+#   sudo chown -R bridge:bridge /var/lib/bridge /etc/bridge
+#   sudo cp systemd/bridge.service /etc/systemd/system/bridge.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bridge
+#
+# Secrets (BRIDGE_READEST_PASSWORD, BRIDGE_BOOKORBIT_PASSWORD, ...) are best
+# supplied via /etc/bridge/bridge.env (see EnvironmentFile= below) rather
+# than written into bridge.yaml on disk.
+
+[Unit]
+Description=Readest to BookOrbit sync bridge
+Documentation=https://github.com/Riffsmith/bookorbit-readest-sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/bridge --daemon --config /etc/bridge/bridge.yaml
+WorkingDirectory=/var/lib/bridge
+
+# Optional; the leading "-" means a missing file does not block startup.
+EnvironmentFile=-/etc/bridge/bridge.env
+
+User=bridge
+Group=bridge
+
+# The daemon's own retry/backoff already absorbs transient Readest/BookOrbit
+# outages and never exits on them (see internal/sync/engine.go), so a
+# non-zero exit here means something genuinely unexpected (e.g. the state
+# file directory became unwritable). Restart as a safety net regardless.
+Restart=on-failure
+RestartSec=10
+
+# Slightly above the default bridge.http_timeout (30s) so an in-flight
+# request has time to finish rather than being SIGKILLed mid-shutdown.
+TimeoutStopSec=40
+
+# Hardening. The bridge's only I/O is one local state file (already written
+# with 0600 permissions) and outbound HTTPS to Readest/BookOrbit; it opens no
+# listening sockets and needs no elevated privileges.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/bridge
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

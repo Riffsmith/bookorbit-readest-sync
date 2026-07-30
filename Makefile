@@ -10,7 +10,14 @@ GOFLAGS   ?= -trimpath
 LDFLAGS   := -s -w -X main.version=$(VERSION)
 CGO_ENABLED ?= 0
 
-.PHONY: all build run test vet lint fmt tidy clean help
+# Platforms for `make release`. Static Linux binaries only — the project's
+# actual deployment targets (systemd on bare metal/NAS/Raspberry Pi, or
+# Docker; see docs/planning.md's stated deployment answer). No darwin/other
+# targets are cross-compiled here to keep the release surface matched to
+# what's actually shipped and tested.
+RELEASE_PLATFORMS ?= linux/amd64 linux/arm64
+
+.PHONY: all build run test vet lint fmt tidy clean release help
 
 all: build ## Default target: build the binary.
 
@@ -33,6 +40,15 @@ lint: vet ## Alias for static checks (extend with golangci-lint if installed).
 
 tidy: ## Tidy module dependencies.
 	go mod tidy
+
+release: ## Cross-compile static Linux binaries for RELEASE_PLATFORMS into $(BUILD_DIR).
+	@for platform in $(RELEASE_PLATFORMS); do \
+		os=$$(echo $$platform | cut -d/ -f1); \
+		arch=$$(echo $$platform | cut -d/ -f2); \
+		out=$(BUILD_DIR)/$(BINARY)-$$os-$$arch; \
+		echo "building $$out"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $$out $(CMD) || exit 1; \
+	done
 
 clean: ## Remove build artifacts.
 	rm -rf $(BUILD_DIR)
