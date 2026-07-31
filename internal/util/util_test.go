@@ -114,7 +114,6 @@ func TestNormalizeBookOrbitURL(t *testing.T) {
 }
 
 func TestMD5HexAndIsMD5Hex(t *testing.T) {
-	// Known MD5 of "password".
 	if got := MD5Hex("password"); got != "5f4dcc3b5aa765d61d8327deb882cf99" {
 		t.Errorf("MD5Hex(password) = %q, want known digest", got)
 	}
@@ -126,6 +125,22 @@ func TestMD5HexAndIsMD5Hex(t *testing.T) {
 	}
 	if IsMD5Hex("xyz") || IsMD5Hex("5f4dcc3b5aa765d61d8327deb882cf9g") {
 		t.Error("IsMD5Hex should reject invalid input")
+	}
+}
+
+func TestLowerNormal(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"ABC123", "abc123"},
+		{"  MixedCase  ", "mixedcase"},
+		{"already-normal", "already-normal"},
+		{"", ""},
+		{"\tTabbed\n", "tabbed"},
+		{"5F4DCC3B5AA765D61D8327DEB882CF99", "5f4dcc3b5aa765d61d8327deb882cf99"},
+	}
+	for _, c := range cases {
+		if got := LowerNormal(c.in); got != c.want {
+			t.Errorf("LowerNormal(%q) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }
 
@@ -156,7 +171,6 @@ func TestBatchFunc(t *testing.T) {
 		t.Fatalf("BatchFunc visited %d chunks / %d items, want 3/5", chunks, len(seen))
 	}
 
-	// Early stop.
 	chunks = 0
 	BatchFunc(in, 2, func(c []int) bool {
 		chunks++

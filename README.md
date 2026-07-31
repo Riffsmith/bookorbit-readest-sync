@@ -8,16 +8,18 @@ plugins that previously relayed it.
 Readest → Readest Sync → Standalone Bridge → BookOrbit
 ```
 
-> **Status: Phase 7 complete.** Foundation, Readest Supabase auth + sync
-> client, BookOrbit client, the sync engine, and the CLI/packaging layer
-> (help/exit-code handling, a startup connectivity probe, `cmd/bridge` unit
-> tests, a systemd unit, and cross-compiled release builds) are all
-> implemented and unit-tested. The bridge can authenticate to Readest, pull
-> the books table, match-check against BookOrbit, and push batched progress.
-> What remains is formal integration-test validation against live servers
-> (Phase 8) — see `docs/implementation-roadmap.md`. Manual end-to-end runs
-> against real accounts work today (see "Testing against live accounts"
-> below).
+> **Status: Phase 8 complete.** Foundation, Readest Supabase auth + sync
+> client, BookOrbit client, the sync engine, the CLI/packaging layer, and the
+> Phase 8 test-strategy/production-readiness pass are all implemented. Seven
+> live tests against real Readest and BookOrbit accounts have already been
+> run and passed (idempotent re-runs, percentage-delta pushes, both branches
+> of match-check, deleted-row handling, daemon mode + SIGINT shutdown, and
+> the delete→re-add "brand-new" property) — see `live-test-reports.md` and
+> `docs/live-validation-status.md` for the full, permanently tracked record.
+> Two live checks remain open (SIGTERM as a distinct signal; a live Supabase
+> token refresh over a >30 minute run) and a small set of low-priority items
+> are accepted as documented residual risk rather than blocking — both
+> tracked in `docs/live-validation-status.md`.
 
 ---
 
@@ -189,22 +191,32 @@ behaviors were left unverified by the unit tests (see
 
    SIGINT/SIGTERM triggers graceful shutdown and a final state save.
 
-### Known live-server unknowns to watch for
+### Known live-server behavior
 
-- Whether BookOrbit accepts an **empty `progress` string** in
-  `bulk-progress`/`update-progress`. The bridge sends `progress: ""` because
-  it has no open document; if pushes come back as `ErrBadRequest`, this is the
-  issue surfacing (the referenced fallback `"0"` is not yet implemented).
-- The **exact status code** BookOrbit returns for an unsupported endpoint,
-  which drives the bulk→single-PUT fallback in `engine.RunOnce`. If the wrong
-  code comes back, the fallback won't trigger and you'll see bulk-progress
-  failures instead.
+The full, permanently tracked list of live-validation items (resolved, open,
+and accepted residual risk) lives in `docs/live-validation-status.md`. The
+highlights:
+
+- **Confirmed accepted:** BookOrbit's `bulk-progress`/`update-progress`
+  endpoints accept an **empty `progress` string**. The bridge always sends
+  `progress: ""` (it has no open document); this was exercised live in
+  `live-test-reports.md` Tests 2 and 4 — both pushes succeeded and displayed
+  the correct percentage in the BookOrbit dashboard. No fallback value is
+  needed.
+- **Accepted residual risk (not yet exercised live):** the exact status code
+  an *older* BookOrbit server returns for an unsupported endpoint (drives the
+  bulk→single-PUT fallback in `engine.RunOnce`); rate limiting (429) from
+  either service; a very large `since=0` full-library pull; a small set of
+  Readest hosted-API edge behaviors (redirects, 401-vs-403 semantics) this
+  project doesn't control. See `docs/live-validation-status.md` for the full
+  reasoning behind each.
 - Whether BookOrbit honors **older `updated_at` seconds** or silently keeps a
   newer value it already has — harmless for one-way sync either way, but
   progress may appear "stuck" if the server discards older writes.
 - Re-running `--once` with unchanged percentages **will not re-push** —
   `lastPushedPct` deduplication is intentional, so trial runs are safe and
-  won't spam BookOrbit.
+  won't spam BookOrbit. Confirmed live in Test 1 and Test 2's immediate
+  second run.
 
 ## Development
 
@@ -286,10 +298,12 @@ changes, deferred until there's real demand for it.
 
 ## Roadmap
 
-See `docs/implementation-roadmap.md`. Phases 0–7 are complete (foundation,
+See `docs/implementation-roadmap.md`. Phases 0–8 are complete (foundation,
 config/utilities/logging/state, Readest auth + sync client, BookOrbit client,
-sync engine, CLI/packaging). Remaining: Phase 8 (formal integration-test
-validation against live servers).
+sync engine, CLI/packaging, and the Phase 8 test-strategy/production-
+readiness pass). Two live checks remain scheduled but not yet run — SIGTERM
+as a distinct signal, and a live Supabase token refresh over a >30 minute
+observation window — tracked in `docs/live-validation-status.md`.
 
 ## License
 

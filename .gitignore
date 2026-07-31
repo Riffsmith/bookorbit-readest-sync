@@ -25,3 +25,6 @@ bridge-state.json
 # Test / coverage output
 coverage.out
 *.coverprofile
+
+
+reference

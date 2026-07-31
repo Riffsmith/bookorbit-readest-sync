@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -58,7 +59,7 @@ func TestDurationParsing(t *testing.T) {
 	}{
 		{"15m", 15 * time.Minute},
 		{"1h30m", 90 * time.Minute},
-		{"900", 900 * time.Second}, // bare seconds
+		{"900", 900 * time.Second},
 	}
 	for _, c := range cases {
 		got, err := time_ParseDuration(c.in)
@@ -77,7 +78,6 @@ func TestLoadMissingFileUsesDefaults(t *testing.T) {
 	if !errors.Is(err, ErrNoConfigFile) {
 		t.Fatalf("Load missing file err = %v, want ErrNoConfigFile", err)
 	}
-	// Defaults should be present even with no file.
 	if cfg.Bridge.PollInterval != 15*time.Minute {
 		t.Errorf("default poll interval = %v, want 15m", cfg.Bridge.PollInterval)
 	}
@@ -113,7 +113,6 @@ bridge:
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
-	// device_name is not overridden by env here, so the file value wins.
 	if cfg.BookOrbit.DeviceName != "file-device" {
 		t.Errorf("device_name = %q, want file value", cfg.BookOrbit.DeviceName)
 	}
@@ -158,7 +157,6 @@ func TestEnvOverridesFile(t *testing.T) {
 }
 
 func TestValidateReportsAllProblems(t *testing.T) {
-	// Deliberately do NOT set required env; config should be missing creds.
 	cfg := Default()
 	cfg.BookOrbit.ServerURL = ""
 	err := cfg.Validate()
@@ -172,21 +170,51 @@ func TestValidateReportsAllProblems(t *testing.T) {
 }
 
 func TestAuthKeyDerivation(t *testing.T) {
-	// From password.
 	cfg := Config{}
 	cfg.BookOrbit.Password = "password"
 	if got := cfg.AuthKey(); got != "5f4dcc3b5aa765d61d8327deb882cf99" {
 		t.Errorf("AuthKey from password = %q, want MD5 digest", got)
 	}
-	// Pre-hashed userkey wins and is normalized.
 	cfg.BookOrbit.Userkey = "  5F4DCC3B5AA765D61D8327DEB882CF99 "
 	if got := cfg.AuthKey(); got != "5f4dcc3b5aa765d61d8327deb882cf99" {
 		t.Errorf("AuthKey from userkey = %q, want normalized digest", got)
 	}
 }
 
-// setRequiredEnv supplies the minimum credentials validation requires so tests
-// that call Load do not fail on missing secrets.
+func TestEnvSupabaseAnonKeyBase64JWTShapedDecodes(t *testing.T) {
+	// applyEnv's conditional: a value that base64-decodes AND whose decoded
+	// form starts with "eyJ" (a JWT-shaped prefix) is treated as base64 and
+	// decoded before being stored.
+	setRequiredEnv(t)
+	plain := "eyJhbGciOiJIUzI1NiJ9-test-payload"
+	encoded := base64.StdEncoding.EncodeToString([]byte(plain))
+	t.Setenv(EnvSupabaseAnonKey, encoded)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	if !errors.Is(err, ErrNoConfigFile) {
+		t.Fatalf("Load err = %v, want ErrNoConfigFile", err)
+	}
+	if cfg.Readest.SupabaseAnonKey != plain {
+		t.Errorf("SupabaseAnonKey = %q, want decoded %q", cfg.Readest.SupabaseAnonKey, plain)
+	}
+}
+
+func TestEnvSupabaseAnonKeyRawPassthroughWhenNotBase64(t *testing.T) {
+	// A value that is not valid base64 is used verbatim, exercising
+	// applyEnv's else branch.
+	setRequiredEnv(t)
+	raw := "not-a-valid-base64-string!!!"
+	t.Setenv(EnvSupabaseAnonKey, raw)
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	if !errors.Is(err, ErrNoConfigFile) {
+		t.Fatalf("Load err = %v, want ErrNoConfigFile", err)
+	}
+	if cfg.Readest.SupabaseAnonKey != raw {
+		t.Errorf("SupabaseAnonKey = %q, want raw passthrough %q", cfg.Readest.SupabaseAnonKey, raw)
+	}
+}
+
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv(EnvReadestEmail, "test@example.com")

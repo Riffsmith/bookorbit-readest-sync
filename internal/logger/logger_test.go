@@ -9,14 +9,14 @@ import (
 func TestLevelParsing(t *testing.T) {
 	cases := []struct {
 		in       string
-		wantInfo bool // whether an info message is emitted at this level
+		wantInfo bool
 	}{
 		{"debug", true},
 		{"info", true},
 		{"INFO", true},
 		{"warn", false},
 		{"error", false},
-		{"bogus", true}, // unknown falls back to info
+		{"bogus", true},
 		{"", true},
 	}
 	for _, c := range cases {
@@ -52,6 +52,24 @@ func TestTextFormat(t *testing.T) {
 }
 
 func TestNilWriterDefaultsToStderr(t *testing.T) {
-	// Should not panic with a nil writer.
 	_ = New(nil, "info", "json")
+}
+
+func TestLevelName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"debug", "DEBUG"},
+		{"DEBUG", "DEBUG"},
+		{"info", "INFO"},
+		{"INFO", "INFO"},
+		{"", "INFO"},
+		{"warn", "WARN"},
+		{"warning", "WARN"},
+		{"error", "ERROR"},
+		{"bogus", "INFO"},
+	}
+	for _, c := range cases {
+		if got := LevelName(c.in); got != c.want {
+			t.Errorf("LevelName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }

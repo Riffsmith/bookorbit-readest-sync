@@ -255,4 +255,155 @@ The plugin source is authoritative for behavior. The following items in `plannin
 
 ---
 
-*Prepared from source inspection of `reference/readest.koplugin/` and `reference/koreader-plugin/bookorbit.koplugin/`.*
+## 8. BookOrbit server-side findings (dashboard-trigger investigation)
+
+Source for this section: `reference/bookorbit/server/` and `reference/bookorbit/client/src/`, read for the dashboard-triggered-sync feasibility question (full write-up: `docs/dashboard-triggered-sync-feasibility.md`). The earlier sections of this report were derived from the *plugin* source; this section adds findings from the *server itself*.
+
+### 8.1 The real-time chain from koreader write to dashboard refresh already exists end-to-end
+
+A koreader progress push already triggers the dashboard to refresh scrollers within 250ms, via a fully wired chain:
+
+| Hop | Site | Evidence |
+|---|---|---|
+| 1. koreader write commits, emits in-process event | `koreader.service.ts:303` | `this.achievementEvents.emit(ACHIEVEMENT_EVENT_BOOK_PROGRESS_CHANGED, { userId, bookId, bookFileId, progress, source: 'koreader' })` — fires in both the single-PUT path (`applySharedProgress`, line 287-310) and the bulk path (`applyBulkProgress`, line 200-285, per entry via line 275). |
+| 2. Event bus is a hand-rolled `EventEmitter`, in-process only | `achievement-events.service.ts:72` | `export class AchievementEventsService extends EventEmitter {}`. `grep EventEmitterModule.forRoot()` across `server/src` returns zero hits — confirmed: NOT `@nestjs/event-emitter`. An external bridge cannot `.emit()` into it directly; it must hit an HTTP endpoint that re-enters in-process code. |
+| 3. ScanGateway subscribes on init, re-emits over Socket.IO to the user's room | `scan.gateway.ts:46-52` (`onModuleInit` registers `handleBookProgressChanged`); `scan.gateway.ts:141-148` `emitBookProgressChanged` → `this.server?.to(\`user:${payload.userId}\`).emit('book:progress-changed', event)` | Connection handler `scan.gateway.ts:63-79` JWTs the client and `await client.join(\`user:${user.id}\`)`. |
+| 4. Vue client listens, debounces a re-`load` | `useBookEvents.ts:80-83` registers the `book:progress-changed` listener; `useBookProgressRefresh.ts:1-22` debounces (`PROGRESS_REFRESH_DEBOUNCE_MS = 250`) and re-calls `load` | `useDashboardScroller.ts:28` wires `useBookProgressRefresh(load)` — so *any* koreader/push event today causes the scroller to re-fetch within 250ms, no manual refresh. |
+
+This chain is the load-bearing precedent the dashboard-trigger feasibility document relies on: a bridge-triggered progress write goes through the same koreader plugin endpoint, so the same chain fires automatically.
+
+### 8.2 Dashboard paths: scroller rows are NOT cached, widget rows ARE
+
+- **Scroller cards are uncached.** `dashboard.controller.ts:9-24` → `dashboard.service.ts:34-43` (`getScroller`) → `dashboard.service.ts:23-32` (`loadCardsByIds`) → `book-read.service.ts:30-32` (`findCardsByBookIds`) → `book.repository.ts:704-727` (`findCardsByBookIds`), which performs fresh LEFT JOINs to `userBookStatus` (`book.repository.ts:660`) and `readingProgress` (`book.repository.ts:666-670`) on every call. `grep Redis|redis` across `dashboard/` and `book/` returns zero matches. **Implication: ensuring the bridge's commit happens *before* `findCardsByBookIds` runs guarantees first-load scroller freshness — no cache-invalidation mechanism needed.**
+- **Widget rows are cached in-process.** `dashboard-widget.service.ts:36-43` declares `liveCache` (TTL `DASHBOARD_LIVE_TTL_MS = 120_000`) and `staleCache` (TTL `DASHBOARD_STALE_TTL_MS = 300_000`); `dashboard-widget.service.ts:69-77` routes per-widget loaders through `this.liveCache.get(userId, ...)`. Cache implementation: `common/cache/stats-cache.ts:1-122`, an in-process LRU with `clearForScope(scope)` at `stats-cache.ts:62-78`.
+- **Blocker, confirmed by negative evidence:** there is **no** code path that calls `liveCache.clearForScope(...)` or `staleCache.clearForScope(...)` when a koreader progress event fires — `grep clearForScope` across `server/src/modules/dashboard` returns hits only in `stats-cache.ts` itself, never in a service caller. So a koreader/bridge progress push today does not invalidate the widget cache; widgets can serve 120s of stale "currently-reading" data after a push, even though the scrollers refresh via Socket.IO.
+- **Precedent for invalidation:** `user-statistics.service.ts:394` calls `this.cache.clearForScope(String(user.id))` after `moveReadingSession` writes — same `StatsCache` shape, same `clearForScope` method, same user-scoped key. A bridge-triggered write path would mirror this pattern.
+
+### 8.3 Custom-guard `@Public()` controllers — precedents for adding an inbound webhook
+
+BookOrbit's standard global guard stack (`app.module.ts:157-163`: `SensitiveEndpointThrottlerGuard` → `JwtAuthGuard` → `PermissionGuard` → `LibraryAccessGuard`) blocks everything not opted out. The opt-out + custom-guard pattern is well established:
+
+| Guard | Site | Auth source | Consumer |
+|---|---|---|---|
+| `KoreaderAuthGuard` | `koreader-auth.guard.ts:13-58` | `x-auth-user` / `x-auth-key` headers, DB lookup against `koreaderUsers` | `koreader.controller.ts:51-77` (`@Public() @UseGuards(KoreaderAuthGuard) @Put('syncs/progress')`); `koreader-plugin.controller.ts:27-30` (class-level on `/koreader/plugin`) |
+| `KoboTokenGuard` | `kobo/guards/kobo-token.guard.ts:18-67` | path param `:deviceToken` *or* header `x-kobo-deviceid`, DB lookup against `koboDevices` | `kobo-sync.controller.ts:82-83` etc. |
+| `OpdsAuthGuard` | (referenced, not explored here) | likely shared-secret | OPDS routes |
+
+There is no purely config-driven shared-secret guard in the codebase today (both precedents do DB lookups). Adding a small `BridgeSecretGuard` for an external-bridge-triggered webhook is a new variant on the structural pattern `@Public() + custom CanActivate`, not a new architecture.
+
+### 8.4 Server lifecycle and hooks
+
+- **Fastify confirmed** (`main.ts:1-2,32-33`; `DEVELOPMENT.md:32`: "NestJS 11, Fastify, Drizzle ORM").
+- **Socket.IO adapter is the Nest fastify adapter** (`main.ts:58`: `app.useWebSocketAdapter(new IoAdapter(app))`).
+- `app.enableShutdownHooks()` is enabled (`main.ts:113`).
+- `OnModuleInit` (e.g. `scan.gateway.ts:46`, `audit.service.ts:25`) and `onApplicationBootstrap` (e.g. `file-watcher.service.ts:47` for chokidar, `book-dock-watcher.service.ts:38` for Postgres `LISTEN/NOTIFY`) are used heavily — adding a new long-running listener is precedented.
+
+### 8.5 Concurrent-write semantics found on the server
+
+**Progress writes (`PUT /koreader/syncs/progress`, `POST /koreader/plugin/progress`):** Postgres `INSERT … ON CONFLICT DO UPDATE` on `(bookFileId, userId, device, deviceId)` for `koreader_device_progress` (`koreader.repository.ts:435-467`) and on `(bookFileId, userId)` for `reading_progress` (`koreader.repository.ts:536-562`). **No enclosing transaction, no `FOR UPDATE` lock.** Last-writer-wins at the row level.
+
+**Subtle but load-bearing detail:** `koreader.repository.ts:559` deliberately does **NOT** update `updatedAt` on the `ON CONFLICT` branch for `reading_progress`:
+```ts
+set: { ... updatedAt: sql`"reading_progress"."updated_at"` }
+```
+This preserves the existing `updatedAt` (set by BookOrbit's web reader) so `koreader.service.ts:321-369`'s `getProgress` does not falsely timestamp a koreader push as the "newest web-reader sync." **Concrete rule: the bridge must use a `device`/`deviceId` distinct from `bookorbit-web`**, so the two write populations don't share a `koreader_device_progress` row and the deliberate `updatedAt`-preservation semantics stay intact. The shipped bridge already satisfies this (`internal/sync/state/state.go:39`, PHASE 6 ADR Addendum confirms `device: "readest-bridge"`).
+
+**Status writes (`PUT /koreader/plugin/catalog/books/{id}/read-status` → `user-book-status.service.ts:setManual` → `reading-attempt.service.ts:46-118`):** `SELECT … FOR UPDATE` on `findActive`/`findLatest` (`reading-attempt.repository.ts:85-100`, `:102-111`) inside one DB transaction. Concurrent status writes for the same `(user, book)` serialize at the row lock. Documented in detail in §9 below.
+
+---
+
+## 9. BookOrbit server-side findings (status-sync investigation)
+
+Source for this section: `reference/bookorbit/server/`, read for the status-sync design investigation (full write-up of the decisions: `docs/status-sync-design-investigation.md` §6, the new section added in the same investigation pass). This section establishes the server-side contract for `PUT /api/v1/koreader/plugin/catalog/books/{bookId}/read-status` (Channel B in the status-sync docs), which the Readest-to-BookOrbit bridge will push to.
+
+### 9.1 Endpoint contract (path, auth, body, response)
+
+- **Path:** `PUT /api/v1/koreader/plugin/catalog/books/{bookId}/read-status`
+  - `@Controller('koreader/plugin/catalog')` — `koreader-catalog.controller.ts:24`. Global API prefix `/api/v1` is applied (`main.ts:60-62`), no exclude for this controller. The same `CATALOG_BASE = '/api/v1/koreader/plugin/catalog'` constant is used in `koreader-catalog.service.ts:64`.
+- **Auth:** `KoreaderAuthGuard` validates `x-auth-user` / `x-auth-key` headers. The controller's `setReadStatus` is `@Public() @UseGuards(KoreaderAuthGuard)`'d in the koreader-plugin module pattern (verified by `koreader-auth.guard.ts:13-58`'s role and the `@Public()` precedent established in §8.3 above).
+
+### 9.2 Exact settable status surface — five tokens, no `unread`
+
+- **DTO:** `KoreaderCatalogSetReadStatusDto` at `koreader-catalog-query.dto.ts:245-248`:
+  ```ts
+  export class KoreaderCatalogSetReadStatusDto {
+    @IsIn(KOREADER_CATALOG_SETTABLE_READ_STATUSES)
+    status!: KoreaderCatalogSettableReadStatus;
+  }
+  ```
+- **Validation list** at `koreader-catalog-query.dto.ts:27-33`:
+  ```ts
+  export const KOREADER_CATALOG_SETTABLE_READ_STATUSES = [
+    'want_to_read', 'reading', 'on_hold', 'read', 'abandoned',
+  ] as const satisfies readonly KoreaderCatalogSettableReadStatus[];
+  ```
+- **Type union** at `packages/types/src/koreader.ts:152`:
+  ```ts
+  export type KoreaderCatalogSettableReadStatus = "want_to_read" | "reading" | "on_hold" | "read" | "abandoned";
+  ```
+  with a comment at `:150-151`: *"Read statuses the catalog detail page can set on a book. A subset of the full ReadStatus enum, chosen for reading-device ergonomics."*
+
+**Confirmed:** the server accepts exactly five tokens. Matches the Lua plugin's `bookorbit_catalog_util.lua:84-90`. The full 8-value `ReadStatus` (`packages/types/src/book.ts:25-26`) — including `unread`, `rereading`, `skimmed` — is **not** accepted here.
+
+### 9.3 Body contract — exactly `{status}`, no device fields; `forbidNonWhitelisted` rejects extras
+
+- The DTO is two fields only (`koreader-catalog-query.dto.ts:245-248`): one `status` field. No `deviceId`, `deviceModel`, `pluginVersion`, `deviceTime` (unlike Channel A / bulk-progress / match-check).
+- The global `ValidationPipe` runs with `forbidNonWhitelisted: true` and `whitelist: true` (`server/src/main.ts:64-70`). Sending any extra field — including device fields or a malformed status token — produces a 400 *before the service method is entered*. The controller (`koreader-catalog.controller.ts:81-84`) reads only `body.status`.
+
+**Implication for Decision B in `docs/status-sync-design-investigation.md`:** the live-probe item ("What does a success response look like, and does Channel B require device-scoped fields?") is now answered by source inspection: no device fields, body is exactly `{"status": "<token>"}`. No live probe is needed for the request shape; it's known.
+
+### 9.4 Response — 200 with `{ readStatus: <token> }` (echo of request, not projected)
+
+- Service method `koreader-catalog.service.ts:275-279`:
+  ```ts
+  async setReadStatus(user: RequestUser, bookId: number, status: KoreaderCatalogSettableReadStatus): Promise<KoreaderCatalogReadStatusResult> {
+    await this.bookService.verifyBookAccess(bookId, user);
+    await this.userBookStatusService.setManual(user.id, bookId, status);
+    return { readStatus: status };
+  }
+  ```
+- Return type at `packages/types/src/koreader.ts:370-372`: `{ readStatus: KoreaderCatalogSettableReadStatus }`. So the response echoes the requested token, not any normalized projection.
+- HTTP status on success: 200 (NestJS `@Put` default; no `@HttpCode` decorator on the controller method).
+
+**Important caveat — projection may differ from the echoed token.** The server's internal `reading-attempt.service.ts:114` projects `reading` on a previously-completed book to `rereading` in the DB:
+```ts
+const projectedStatus = active ? (status === 'on_hold' ? 'on_hold' : completedBefore ? 'rereading' : 'reading') : status;
+```
+The persistence can be `rereading` even though the response echoes `reading`. **Doesn't affect the bridge's status-sync semantics** (Readest `reading` is non-decisive and always skipped per `readingstatus.lua:5-9`'s documented precedent), but worth recording as a server-side behavior.
+
+### 9.5 Error classification — 400/401/403/404, mapped
+
+| Condition | HTTP status | Source |
+|---|---|---|
+| Bad/missing `status` token, extra body fields, non-integer `bookId` | **400** | Global `ValidationPipe` with `forbidNonWhitelisted: true` (`main.ts:64-70`); `@Param('bookId', ParseIntPipe)` on the controller (`koreader-catalog.controller.ts:82`) |
+| Bad/missing KOReader credentials, account inactive, `KoreaderSync` permission revoked | **401** | `koreader-auth.guard.ts:25-51` |
+| Sync disabled for KOReader user | 403 (from guard) | `koreader-auth.guard.ts` |
+| Real book the user genuinely has no library access to | **403** | `library.service.ts:63-67`: `verifyUserAccess` throws `ForbiddenException('No access to this library')` |
+| Book not found, OR book filtered out by the user's content filters | **404** | `book.service.ts:472-481`: `verifyBookAccess` throws `NotFoundException(\`Book ${bookId} not found\`)` both for "book doesn't exist" (line 474, `libraryId === null` after deletion) AND for content-filter rejection (line 479). This is intentional non-existence-leak prevention: the same status covers both cases. |
+| Anything else | 500 | `GlobalExceptionFilter` at `http-exception.filter.ts:19-46` forwards `exception.getStatus()` for `HttpException` subclasses unchanged; only swaps to 500 for non-`HttpException`. |
+
+**Implication for Decision C in `docs/status-sync-design-investigation.md`:** the doc's original premise (treat 404/405 as "feature unsupported on this BookOrbit version, soft-disable") was based on the lua-plugin reference only. The TS server inspection reveals there is no "endpoint missing" case for Channel B — it's a first-class route in the same controller that ships `bookDetail`. The reframe: **404 means the cached `bookId` is stale** (book deleted from the user's library, or access revoked). The bridge should treat 404 as a "drop this book from the status sync set for this hash" signal — `state.DeleteMatch(hash)` + `state.SetUnmatched(hash, now)`, watermark advances normally (NOT retreated) — mirroring the engine's treatment of `BulkProgress`'s `resp.Unmatched` (Phase 6 §6.3 Addendum 2).
+
+### 9.6 Atomicity / concurrency — `SELECT … FOR UPDATE` inside a transaction
+
+Status writes are transactional and row-locked — a clean contrast with the progress upsert path (§8.5):
+
+- `reading-attempt.service.ts:46-118` runs entirely inside `this.repo.transaction(...)` (Drizzle's `db.transaction`).
+- `reading-attempt.repository.ts:85-100` (`findActive`) and `:102-111` (`findLatest`) both end with `.for('update')` — Postgres `SELECT … FOR UPDATE` on the per-(user, book) `reading_attempts` rows.
+- `reading-attempt.repository.ts:184-193`'s `project` upserts `user_book_status` via `INSERT … ON CONFLICT (userId, bookId) DO UPDATE` inside the same transaction.
+
+Net effect: two concurrent `PUT .../read-status` calls for the same `bookId` serialize on the lock, then last-committer-wins on `user_book_status.status`. No torn-state window; no optimistic concurrency (no version column).
+
+### 9.7 No way to "clear" a status via Channel B — `unread` is not settable here
+
+- `unread` is excluded from `KOREADER_CATALOG_SETTABLE_READ_STATUSES` (`koreader-catalog-query.dto.ts:27-33`); the DTO rejects it with 400. Same for `rereading` and `skimmed`.
+- The web Vue client's `useBookStatus.ts:10-19` surfaces all 8 statuses (including `unread` as "clear"); it writes via a *different* endpoint, `PATCH /api/v1/books/{bookId}/status` (`useBookStatus.ts:50-58`), gated by JWT bearer auth, not `x-auth-user`/`x-auth-key`.
+- The koreader catalog route cannot unset back to `unread`. **Implication for the Readest→BookOrbit one-way status bridge's `unread` mapping:** confirmed as a documented no-op (per `future-status-sync.md §2`'s recommendation), not a real write.
+
+### 9.8 The `book.status-changed` event has NO Socket.IO subscriber today
+
+`user-book-status.service.ts:69-91` emits `ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED` only when `statusChanged` is true (gated). But `grep ACHIEVEMENT_EVENT_BOOK_STATUS_CHANGED` across `server/src/modules/**/*gateway.ts` returns zero hits — no gateway subscribes. Only integration-event listeners do: `readwise-event-listener.service.ts`, `hardcover-event-listener.service.ts`, `storygraph-event-listener.service.ts`. So a status write via Channel B today does **not** trigger a dashboard refresh via the existing real-time chain. This is a relevant contrast with the progress path (§8.1) and is flagged in both `docs/dashboard-triggered-sync-feasibility.md §9` and `docs/status-sync-design-investigation.md §6` (Decision C / status-change follow-on).
+
+---
+
+*Sections 1–7 prepared from `reference/readest.koplugin/` and `reference/koreader-plugin/bookorbit.koplugin/`. Sections 8–9 additionally prepared from `reference/bookorbit/server/` and `reference/bookorbit/client/src/`.*
