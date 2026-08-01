@@ -23,6 +23,10 @@ const (
 	EnvBookOrbitUserkey    = "BRIDGE_BOOKORBIT_USERKEY"
 	EnvBookOrbitDeviceName = "BRIDGE_BOOKORBIT_DEVICE_NAME"
 	EnvBookOrbitDeviceID   = "BRIDGE_BOOKORBIT_DEVICE_ID"
+	// EnvBookOrbitAllowInsecureTransport opts into cleartext http:// for a
+	// non-loopback bookorbit.server_url. Default false; see AllowInsecureTransport
+	// doc-comment on BookOrbitConfig for the precise scope of this opt-in.
+	EnvBookOrbitAllowInsecureTransport = "BRIDGE_BOOKORBIT_ALLOW_INSECURE_TRANSPORT"
 
 	EnvPollInterval = "BRIDGE_POLL_INTERVAL"
 	EnvLogLevel     = "BRIDGE_LOG_LEVEL"
@@ -54,6 +58,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.BookOrbit.Userkey, EnvBookOrbitUserkey)
 	setStr(&c.BookOrbit.DeviceName, EnvBookOrbitDeviceName)
 	setStr(&c.BookOrbit.DeviceID, EnvBookOrbitDeviceID)
+	setBool(&c.BookOrbit.AllowInsecureTransport, EnvBookOrbitAllowInsecureTransport)
 
 	setStr(&c.Bridge.LogLevel, EnvLogLevel)
 	setStr(&c.Bridge.LogFormat, EnvLogFormat)

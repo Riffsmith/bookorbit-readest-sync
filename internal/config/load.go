@@ -102,6 +102,12 @@ func (c *Config) applyValues(v map[string]string) error {
 			c.BookOrbit.DeviceName = val
 		case "bookorbit.device_id":
 			c.BookOrbit.DeviceID = val
+		case "bookorbit.allow_insecure_transport":
+			b, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("bookorbit.allow_insecure_transport: %w", err)
+			}
+			c.BookOrbit.AllowInsecureTransport = b
 
 		// Bridge.
 		case "bridge.poll_interval":

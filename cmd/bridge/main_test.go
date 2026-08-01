@@ -98,6 +98,20 @@ func TestRunMissingConfigInsufficientEnvFailsValidation(t *testing.T) {
 // connection, so the failure is immediate and deterministic instead of
 // waiting out the engine's real exponential backoff against an unreachable
 // host.
+//
+// Security hardening note: the test server is a TLS one (httptest.NewTLSServer)
+// so its URL is https://127.0.0.1:<port>, satisfying the stricter Validate
+// clauses added by docs/security-hardening-bookorbit-url-validation-design.md
+// (Readest URLs require https outright with no opt-out; BookOrbit http is
+// permitted only for loopback/link-local). Production code's httpclient.New
+// builds a plain *http.Client whose Transport falls back to
+// http.DefaultTransport; for the duration of this test we swap DefaultTransport
+// to the test server's pre-verified transport (srv.Client().Transport, which
+// trusts the server's auto-generated cert), then restore it via t.Cleanup so
+// no other test sees the swap. This is a contained, testing-only arrangement
+// — no production code is changed to accept a custom CA, TLS pinning, or any
+// other certificate-allowlist relaxation (which the design explicitly puts in
+// §2.2's non-goals).
 func TestRunOnceFullWiringSurfacesClassifiedError(t *testing.T) {
 	mux := http.NewServeMux()
 	// Supabase password grant: let auth succeed so PullBooks actually
@@ -116,8 +130,15 @@ func TestRunOnceFullWiringSurfacesClassifiedError(t *testing.T) {
 	mux.HandleFunc("/api/v1/koreader/users/auth", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewTLSServer(mux)
 	defer srv.Close()
+
+	// Route the production path (httpclient.New -> *http.Client with the
+	// default Transport) through the test server's verified transport. See the
+	// function-level comment for why this is the right, contained approach.
+	savedTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = savedTransport })
 
 	t.Setenv(config.EnvReadestEmail, "user@example.com")
 	t.Setenv(config.EnvReadestPassword, "pw")

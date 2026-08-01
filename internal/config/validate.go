@@ -25,18 +25,32 @@ func (c *Config) Validate() error {
 	}
 	if c.Readest.SupabaseURL == "" {
 		problems = append(problems, "readest.supabase_url must not be empty")
+	} else {
+		problems = appendReadestURLProblem(problems, "readest.supabase_url", c.Readest.SupabaseURL)
 	}
 	if c.Readest.SupabaseAnonKey == "" {
 		problems = append(problems, "readest.supabase_anon_key must not be empty")
 	}
 	if c.Readest.SyncBaseURL == "" {
 		problems = append(problems, "readest.sync_base_url must not be empty")
+	} else {
+		problems = appendReadestURLProblem(problems, "readest.sync_base_url", c.Readest.SyncBaseURL)
 	}
 
 	// BookOrbit needs a target server, a username, and either a password or a
 	// pre-hashed userkey from which to derive x-auth-key.
 	if c.BookOrbit.ServerURL == "" {
 		problems = append(problems, "bookorbit.server_url is required (or set "+EnvBookOrbitServerURL+")")
+	} else {
+		// Security-hardening pass: the BookOrbit wire protocol uses an
+		// unsalted MD5 of the password as the x-auth-key header — a
+		// password-equivalent credential. Confine where that credential
+		// is allowed to travel at config load, where the operator can
+		// still correct a misconfiguration, instead of silently sending
+		// it over cleartext or to an unexpected scheme/host. See
+		// docs/security-hardening-bookorbit-url-validation-design.md §3
+		// for the settled-scheme (Decisions B/C/D/F).
+		problems = appendBookOrbitURLProblems(problems, c)
 	}
 	if c.BookOrbit.Username == "" {
 		problems = append(problems, "bookorbit.username is required (or set "+EnvBookOrbitUsername+")")
@@ -97,4 +111,62 @@ func (c *Config) AuthKey() string {
 		return util.LowerNormal(c.BookOrbit.Userkey)
 	}
 	return util.MD5Hex(c.BookOrbit.Password)
+}
+
+// appendBookOrbitURLProblems adds validation problems for the (already
+// non-empty, already-normalized) BookOrbit server_url. The URL is normalized
+// before Validate runs (load.go finalize -> util.NormalizeBookOrbitURL), so a
+// malformed input has already collapsed to "" and the caller's empty-URL
+// check above has produced the "is required" problem. This helper still
+// re-derives the scheme from the post-normalization form so it can surface:
+//   - an unusable scheme (parse error / missing scheme / non-http(s)), and
+//   - a cleartext http:// URL pointing at a non-loopback, non-link-local host
+//     unless the operator has explicitly opted in via
+//     bookorbit.allow_insecure_transport.
+//
+// The shape check runs unconditionally; the cleartext check runs only when the
+// shape check passed (so an unparseable URL produces one diagnostic, not two).
+// See docs/security-hardening-bookorbit-url-validation-design.md §3 Decisions
+// B/C/D and §6 Step 7.
+func appendBookOrbitURLProblems(problems []string, c *Config) []string {
+	scheme, err := util.SchemeOf(c.BookOrbit.ServerURL)
+	if err != nil {
+		return append(problems, "bookorbit.server_url is not a valid URL: "+err.Error())
+	}
+	if scheme != "http" && scheme != "https" {
+		return append(problems, "bookorbit.server_url must use http or https; got "+scheme)
+	}
+	if scheme == "http" {
+		host := util.HostOf(c.BookOrbit.ServerURL)
+		if !util.IsLoopbackOrLinkLocal(host) && !c.BookOrbit.AllowInsecureTransport {
+			return append(problems,
+				"bookorbit.server_url uses cleartext http to a non-loopback host ("+host+
+					"); the x-auth-key header is the MD5 of your password (a password-equivalent credential). "+
+					"Use https://, or set bookorbit.allow_insecure_transport: true to acknowledge the cleartext risk.")
+		}
+	}
+	return problems
+}
+
+// appendReadestURLProblem adds a validation problem if the (already non-empty)
+// Readest endpoint URL is not parseable or does not use https. Unlike
+// BookOrbit there is no cleartext opt-out: both endpoints carry Supabase
+// password-grant and Bearer-token credentials to a third-party-operated
+// service, so https is required outright even for loopback (an operator fully
+// in control of the loopback transport can still set it up with a self-signed
+// cert). See docs/security-hardening-bookorbit-url-validation-design.md §3
+// Decision E.
+//
+// The defaults in internal/config/defaults.go (https://readest.supabase.co,
+// https://web.readest.com/api) already satisfy this; the check is a pure
+// misconfiguration guard that fires only on an explicit override.
+func appendReadestURLProblem(problems []string, label, rawURL string) []string {
+	scheme, err := util.SchemeOf(rawURL)
+	if err != nil {
+		return append(problems, label+" is not a valid URL: "+err.Error())
+	}
+	if scheme != "https" {
+		return append(problems, label+" must use https (Supabase password grant / Bearer token travel to this endpoint)")
+	}
+	return problems
 }

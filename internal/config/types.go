@@ -49,6 +49,17 @@ type BookOrbitConfig struct {
 	// DeviceID is the stable identifier for this bridge instance. If empty,
 	// one is generated on first run and persisted in the state file.
 	DeviceID string `yaml:"device_id"`
+
+	// AllowInsecureTransport, when true, accepts an `http://` BookOrbit
+	// server_url whose host is not a loopback/link-local address. The
+	// x-auth-key header is the unsalted MD5 of the password — a
+	// password-equivalent credential — so cleartext transport to a
+	// non-private host broadcasts it; false (the default) makes that fatal
+	// at config load. Setting it true suppresses the fatal error and emits
+	// a single startup WARN documenting the decision. It relaxes ONLY the
+	// cleartext-non-loopback check: unparseable URLs, bad schemes,
+	// userinfo, and fragments are still fatal regardless of this flag.
+	AllowInsecureTransport bool `yaml:"allow_insecure_transport"`
 }
 
 // BridgeConfig holds daemon behavior and tuning knobs.
