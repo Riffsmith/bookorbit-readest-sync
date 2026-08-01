@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,6 +85,12 @@ type fakeBookOrbit struct {
 	// updateReqs records every UpdateProgress request, in dispatch order, so
 	// the fallback tests can assert per-item push shape and order.
 	updateReqs []bookorbit.UpdateProgressRequest
+
+	// statusCalls records every SetReadStatus invocation in dispatch order.
+	// statusErrs maps bookID -> the error to return for that book (an absent
+	// entry succeeds). Both are Phase 9 additions.
+	statusCalls []statusCall
+	statusErrs  map[int64]error
 }
 
 func (f *fakeBookOrbit) Auth(ctx context.Context) error { return nil }
@@ -103,6 +111,22 @@ func (f *fakeBookOrbit) UpdateProgress(ctx context.Context, req bookorbit.Update
 	f.updateCalls++
 	f.updateReqs = append(f.updateReqs, req)
 	return f.updateErr
+}
+
+// statusCall records one SetReadStatus invocation (the BookOrbit book ID and
+// the token pushed), in dispatch order. Defined next to the fake that records
+// them.
+type statusCall struct {
+	bookID int64
+	token  string
+}
+
+func (f *fakeBookOrbit) SetReadStatus(ctx context.Context, bookID int64, token string) error {
+	f.statusCalls = append(f.statusCalls, statusCall{bookID: bookID, token: token})
+	if err, scripted := f.statusErrs[bookID]; scripted {
+		return err
+	}
+	return nil
 }
 
 // saveCountingStore wraps a state.Store, counting Save() calls so design §12
@@ -151,6 +175,10 @@ func (s *scriptedBookOrbit) BulkProgress(ctx context.Context, req bookorbit.Bulk
 }
 
 func (s *scriptedBookOrbit) UpdateProgress(ctx context.Context, req bookorbit.UpdateProgressRequest) error {
+	return nil
+}
+
+func (s *scriptedBookOrbit) SetReadStatus(ctx context.Context, bookID int64, token string) error {
 	return nil
 }
 
@@ -966,4 +994,480 @@ func TestRunOnceHashReappearsAfterDeletionIsBrandNew(t *testing.T) {
 	if rec.LastPushedPct != 0.0 {
 		t.Errorf("pass 2 LastPushedPct = %v, want 0.0 (fresh)", rec.LastPushedPct)
 	}
+}
+
+// --- Phase 9: reading-status sync -------------------------------------------
+// The status step rides on the resolve the match-check phase already produced
+// (no status-triggered match-check) and is decoupled from the progress
+// watermark (Decision E). mkStatusRow builds a normal progress-carrying row
+// with a reading_status value attached; the tests below pre-seed a MatchRecord
+// so a row enters the status step already-matched, the common steady-state.
+
+// mkStatusRow returns a progress-carrying row with a reading_status attached.
+// total is fixed so the row always has a usable percentage (a row without one
+// is skipped by the status step, per the design's "no business asserting a
+// status" rule).
+func mkStatusRow(hash, status, updatedAt string) readest.BookRow {
+	row := mkRow(hash, 10, 100, updatedAt)
+	row.ReadingStatus = status
+	return row
+}
+
+// newStatusTestEngine builds an engine with SyncStatus enabled. Tests that
+// specifically exercise the gate use newTestEngine (SyncStatus=false default)
+// instead.
+func newStatusTestEngine(rd *fakeReadest, bo bookorbit.API, st state.Store) *Engine {
+	e := newTestEngine(rd, bo, st)
+	e.cfg.Bridge.SyncStatus = true
+	return e
+}
+
+// Table test for the pure mapper, mirroring the existing TestComputeWatermark
+// shape. Cases: the two decisive pushes, the decisive-no-op unread, the
+// non-decisive reading/empty, and one unrecognized-value case.
+func TestMapReadingStatus(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantTok  string
+		wantPush bool
+	}{
+		{"finished", "read", true},
+		{"abandoned", "abandoned", true},
+		{"unread", "", false},  // decisive no-op: unread is BookOrbit's baseline
+		{"reading", "", false}, // non-decisive: never synced
+		{"", "", false},        // absent / "New": non-decisive
+		{"on_hold", "", false}, // unrecognized future value: fail-safe skip
+		{"skimmed", "", false}, // any other schema-drift value: fail-safe skip
+	}
+	for _, c := range cases {
+		t.Run(c.in, func(t *testing.T) {
+			tok, push := mapReadingStatus(c.in)
+			if tok != c.wantTok || push != c.wantPush {
+				t.Errorf("mapReadingStatus(%q) = (%q,%v), want (%q,%v)", c.in, tok, push, c.wantTok, c.wantPush)
+			}
+		})
+	}
+}
+
+// Gate: with SyncStatus disabled, the status step never runs at all, no matter
+// what reading_status the rows carry — zero SetReadStatus calls.
+func TestRunOnceStatusGateOffNeverPushes(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{
+		mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z"),
+		mkStatusRow("h2", "abandoned", "2026-01-02T00:00:00Z"),
+	}}
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	st.SetMatch("h2", state.MatchRecord{BookFileID: 2, BookID: 22})
+	e := newTestEngine(rd, bo, st) // SyncStatus defaults to false
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 0 {
+		t.Errorf("statusCalls = %d, want 0 (gate off)", len(bo.statusCalls))
+	}
+}
+
+// Fresh decisive push: a matched book with a decisive status never pushed
+// before produces exactly one SetReadStatus call with the mapped token, and
+// both the seen and pushed bookkeeping pairs are recorded.
+func TestRunOnceStatusFreshFinishedPushes(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z")}}
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 1 {
+		t.Fatalf("statusCalls = %d, want 1", len(bo.statusCalls))
+	}
+	if bo.statusCalls[0].bookID != 11 || bo.statusCalls[0].token != "read" {
+		t.Errorf("SetReadStatus(%d,%q), want (11,read)", bo.statusCalls[0].bookID, bo.statusCalls[0].token)
+	}
+	rec, _ := st.Match("h1")
+	if rec.LastSeenStatus != "finished" || rec.LastPushedStatus != "read" {
+		t.Errorf("record = %+v, want seen=finished pushed=read", rec)
+	}
+	if rec.LastSeenStatusAt == 0 || rec.LastPushedStatusAt == 0 {
+		t.Error("seen/pushed status timestamps should be non-zero")
+	}
+}
+
+// Token-identical passthrough: abandoned maps to itself.
+func TestRunOnceStatusAbandonedPassthrough(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "abandoned", "2026-01-02T00:00:00Z")}}
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 1 || bo.statusCalls[0].token != "abandoned" {
+		t.Errorf("statusCalls = %+v, want one (abandoned) call", bo.statusCalls)
+	}
+}
+
+// Unchanged status: a book whose mapped token already equals LastPushedStatus
+// makes no call (a strict no-op per the design; the pushed side is current).
+func TestRunOnceStatusUnchangedSkips(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z")}}
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11, LastPushedStatus: "read"})
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 0 {
+		t.Errorf("statusCalls = %d, want 0 (unchanged)", len(bo.statusCalls))
+	}
+}
+
+// Non-decisive values ("reading" and "") never produce a call, regardless of
+// what's in LastPushedStatus. The engine must skip, not just the mapper.
+func TestRunOnceStatusNonDecisiveNeverPushes(t *testing.T) {
+	for _, status := range []string{"reading", ""} {
+		t.Run(status, func(t *testing.T) {
+			rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", status, "2026-01-02T00:00:00Z")}}
+			bo := &fakeBookOrbit{}
+			st := state.NewMemStore()
+			// LastPushedStatus is "read": a non-decisive value must not push
+			// anything even though it differs from the pushed token.
+			st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11, LastPushedStatus: "read"})
+			e := newStatusTestEngine(rd, bo, st)
+
+			if err := e.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if len(bo.statusCalls) != 0 {
+				t.Errorf("statusCalls = %d, want 0 for non-decisive %q", len(bo.statusCalls), status)
+			}
+		})
+	}
+}
+
+// unread is a decisive no-op: no SetReadStatus call, BUT LastSeenStatus still
+// updates so a later unread→finished transition diffs against the right
+// baseline (Decision A; regression guard for stale-comparison bugs).
+func TestRunOnceStatusUnreadRecordsSeenButDoesNotPush(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "unread", "2026-01-02T00:00:00Z")}}
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 0 {
+		t.Errorf("statusCalls = %d, want 0 (unread is a no-op push)", len(bo.statusCalls))
+	}
+	rec, _ := st.Match("h1")
+	if rec.LastSeenStatus != "unread" {
+		t.Errorf("LastSeenStatus = %q, want unread (recorded for later diff)", rec.LastSeenStatus)
+	}
+	if rec.LastSeenStatusAt == 0 {
+		t.Error("LastSeenStatusAt should be non-zero after recording unread")
+	}
+	// Pushed side stays untouched: unread is never written to BookOrbit.
+	if rec.LastPushedStatus != "" {
+		t.Errorf("LastPushedStatus = %q, want empty (unread pushed nothing)", rec.LastPushedStatus)
+	}
+}
+
+// The unread→finished transition: phase 1 records unread (seen only); phase 2
+// sees finished, which — because the seen baseline is "unread", not "" — is
+// recognized as new and pushed. This is the property Decision A exists for.
+func TestRunOnceStatusUnreadThenFinishedTransitions(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "unread", "2026-01-02T00:00:00Z")}}
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("phase 1: %v", err)
+	}
+	if len(bo.statusCalls) != 0 {
+		t.Fatalf("phase 1 statusCalls = %d, want 0", len(bo.statusCalls))
+	}
+
+	rd.rows = []readest.BookRow{mkStatusRow("h1", "finished", "2026-01-03T00:00:00Z")}
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("phase 2: %v", err)
+	}
+	if len(bo.statusCalls) != 1 || bo.statusCalls[0].token != "read" {
+		t.Errorf("phase 2 statusCalls = %+v, want one (read) call", bo.statusCalls)
+	}
+}
+
+// Unmatched book (no MatchRecord, no BookID): the status step skips it
+// entirely, with no panic and no call.
+func TestRunOnceStatusUnmatchedBookSkipped(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z")}}
+	// matchResp returns no match for h1 -> it stays unmatched this poll.
+	bo := &fakeBookOrbit{matchResp: bookorbit.MatchCheckResponse{Unmatched: []string{"h1"}}}
+	st := state.NewMemStore()
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 0 {
+		t.Errorf("statusCalls = %d, want 0 (book unmatched)", len(bo.statusCalls))
+	}
+}
+
+// ErrBookGone: a stale cached bookId (404) drops the book from the sync set —
+// DeleteMatch + SetUnmatched — and explicitly does NOT touch the progress
+// watermark (Decision E decoupling).
+func TestRunOnceStatusBookGoneDropsFromSyncSet(t *testing.T) {
+	row := mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z")
+	rd := &fakeReadest{rows: []readest.BookRow{row}}
+	bo := &fakeBookOrbit{statusErrs: map[int64]error{11: bookorbit.ErrBookGone}}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v (book-gone is not a RunOnce error)", err)
+	}
+	// Dropped from the sync set.
+	if _, merr := st.Match("h1"); !errors.Is(merr, state.ErrNotFound) {
+		t.Errorf("book-gone must DeleteMatch, got %v", merr)
+	}
+	if _, ok := st.UnmatchedAt("h1"); !ok {
+		t.Error("book-gone must SetUnmatched (cooldown recheck gate)")
+	}
+	// Progress watermark advances normally — NOT retreated (Decision E).
+	want := row.WatermarkMs()
+	if got := st.Watermark(); got != want {
+		t.Errorf("watermark = %d, want %d (unaffected by book-gone)", got, want)
+	}
+}
+
+// Retryable status failure, retries exhausted: LastPushedStatus is NOT
+// advanced, the progress watermark/push still advance normally, and the next
+// poll picks the status up again because the mapped value still differs. This
+// is the direct pin for Decision E's decoupling.
+func TestRunOnceStatusFailureDecoupledFromProgress(t *testing.T) {
+	row := mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z")
+	rd := &fakeReadest{rows: []readest.BookRow{row}}
+	bo := &fakeBookOrbit{statusErrs: map[int64]error{11: bookorbit.ErrServer}}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	e := newStatusTestEngine(rd, bo, st)
+	e.cfg.Bridge.RetryMaxAttempts = 0 // one attempt, exhaust immediately
+
+	err := e.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("RunOnce should surface the status failure as an error")
+	}
+	rec, _ := st.Match("h1")
+	if rec.LastPushedStatus == "read" {
+		t.Error("LastPushedStatus must NOT advance on a failed status push")
+	}
+	// Progress decoupling: the progress push for this same row succeeded and
+	// its watermark advanced to the row's WatermarkMs (not retreated).
+	want := row.WatermarkMs()
+	if got := st.Watermark(); got != want {
+		t.Errorf("watermark = %d, want %d (progress unaffected by status failure)", got, want)
+	}
+	if rec.LastPushedAt == 0 {
+		t.Error("progress LastPushedAt should advance even though status failed")
+	}
+
+	// Next poll: the failure retried because the mapped value still differs.
+	bo.statusErrs = nil
+	bo.statusCalls = nil
+	rd.rows = []readest.BookRow{mkStatusRow("h1", "finished", "2026-01-03T00:00:00Z")}
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("retry RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 1 || bo.statusCalls[0].token != "read" {
+		t.Errorf("retry statusCalls = %+v, want one (read) call", bo.statusCalls)
+	}
+}
+
+// ErrUnauthorized: aborts the whole RunOnce, preserving prior committed
+// mutations, with Save still running once — mirroring the existing auth-abort
+// behavior for the progress phases.
+func TestRunOnceStatusUnauthorizedAbortsAndSavesOnce(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{
+		mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z"),
+		mkStatusRow("h2", "finished", "2026-01-02T00:00:00Z"),
+	}}
+	// h1's push (bookID 11) succeeds; h2's push (bookID 22) is unauthorized.
+	bo := &fakeBookOrbit{statusErrs: map[int64]error{22: bookorbit.ErrUnauthorized}}
+	inner := state.NewMemStore()
+	st := &saveCountingStore{Store: inner}
+	inner.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	inner.SetMatch("h2", state.MatchRecord{BookFileID: 2, BookID: 22})
+	e := newStatusTestEngine(rd, bo, st)
+	e.cfg.Bridge.RetryMaxAttempts = 0
+
+	err := e.RunOnce(context.Background())
+	if !errors.Is(err, bookorbit.ErrUnauthorized) {
+		t.Errorf("err = %v, want wrapped ErrUnauthorized", err)
+	}
+	if st.saves != 1 {
+		t.Errorf("saves = %d, want 1 (still saved once on auth abort)", st.saves)
+	}
+	// h1's earlier successful push is preserved.
+	if rec, _ := inner.Match("h1"); rec.LastPushedStatus != "read" {
+		t.Errorf("h1 LastPushedStatus = %q, want read (preserved before abort)", rec.LastPushedStatus)
+	}
+	// h2's push never committed.
+	if rec, _ := inner.Match("h2"); rec.LastPushedStatus != "" {
+		t.Errorf("h2 LastPushedStatus = %q, want empty (aborted before commit)", rec.LastPushedStatus)
+	}
+}
+
+// Mixed multi-book batch: one push (fresh finished), one skip (unchanged
+// abandoned), one drop (ErrBookGone), one non-decisive skip (reading), all in
+// one pass, processed independently.
+func TestRunOnceStatusMixedBatch(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{
+		mkStatusRow("push", "finished", "2026-01-02T00:00:00Z"),
+		mkStatusRow("skip", "abandoned", "2026-01-02T00:00:00Z"),
+		mkStatusRow("drop", "finished", "2026-01-02T00:00:00Z"),
+		mkStatusRow("nodecisive", "reading", "2026-01-02T00:00:00Z"),
+	}}
+	bo := &fakeBookOrbit{statusErrs: map[int64]error{33: bookorbit.ErrBookGone}}
+	st := state.NewMemStore()
+	st.SetMatch("push", state.MatchRecord{BookFileID: 1, BookID: 11})                                // fresh: push
+	st.SetMatch("skip", state.MatchRecord{BookFileID: 2, BookID: 22, LastPushedStatus: "abandoned"}) // unchanged: skip
+	st.SetMatch("drop", state.MatchRecord{BookFileID: 3, BookID: 33})                                // gone: drop
+	st.SetMatch("nodecisive", state.MatchRecord{BookFileID: 4, BookID: 44})                          // reading: no-op
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	// Two SetReadStatus calls are made: the fresh "push" book (11, read) and
+	// the "drop" book (33, read) — the drop book's call fails with ErrBookGone
+	// and the book is then removed from the sync set. The unchanged "skip" and
+	// non-decisive "reading" books make no call.
+	wantBookIDs := map[int64]string{11: "read", 33: "read"}
+	if len(bo.statusCalls) != len(wantBookIDs) {
+		t.Fatalf("statusCalls = %+v, want %d calls", bo.statusCalls, len(wantBookIDs))
+	}
+	for _, c := range bo.statusCalls {
+		if wantToken, ok := wantBookIDs[c.bookID]; !ok || c.token != wantToken {
+			t.Errorf("unexpected SetReadStatus(%d,%q)", c.bookID, c.token)
+		}
+	}
+	if _, merr := st.Match("drop"); !errors.Is(merr, state.ErrNotFound) {
+		t.Error("drop book should be removed from the sync set")
+	}
+	if rec, _ := st.Match("push"); rec.LastPushedStatus != "read" {
+		t.Errorf("push LastPushedStatus = %q, want read", rec.LastPushedStatus)
+	}
+	if rec, _ := st.Match("skip"); rec.LastPushedStatus != "abandoned" {
+		t.Errorf("skip LastPushedStatus = %q, want unchanged abandoned", rec.LastPushedStatus)
+	}
+	if rec, _ := st.Match("nodecisive"); rec.LastPushedStatus != "" {
+		t.Errorf("nodecisive LastPushedStatus = %q, want empty", rec.LastPushedStatus)
+	}
+}
+
+// Save() is still called exactly once per RunOnce with the status step present.
+func TestRunOnceStatusSavesExactlyOnce(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "finished", "2026-01-02T00:00:00Z")}}
+	bo := &fakeBookOrbit{}
+	inner := state.NewMemStore()
+	inner.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	st := &saveCountingStore{Store: inner}
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if st.saves != 1 {
+		t.Errorf("saves = %d, want 1 (still exactly once with the status step)", st.saves)
+	}
+	if len(bo.statusCalls) != 1 {
+		t.Errorf("statusCalls = %d, want 1", len(bo.statusCalls))
+	}
+}
+
+// Unrecognized status value: warn exactly once per distinct value, silent on
+// repeat, and no bookkeeping update (a token we don't understand isn't a
+// status we can claim to have processed). Captures logs via a slog test
+// handler on a dedicated buffer.
+func TestRunOnceStatusUnrecognizedWarnsOnce(t *testing.T) {
+	var buf statusLogBuf
+	handler := slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})
+
+	rd := &fakeReadest{rows: []readest.BookRow{mkStatusRow("h1", "on_hold", "2026-01-02T00:00:00Z")}}
+	bo := &fakeBookOrbit{}
+	st := state.NewMemStore()
+	st.SetMatch("h1", state.MatchRecord{BookFileID: 1, BookID: 11})
+	e := newStatusTestEngine(rd, bo, st)
+	e.log = slog.New(handler)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	if n := buf.countWarnsAbout("on_hold"); n != 1 {
+		t.Errorf("first run warns about on_hold %d times, want exactly 1", n)
+	}
+	if len(bo.statusCalls) != 0 {
+		t.Errorf("statusCalls = %d, want 0 (unrecognized value never pushes)", len(bo.statusCalls))
+	}
+	// No bookkeeping recorded for a value we don't understand.
+	if rec, _ := st.Match("h1"); rec.LastSeenStatus != "" || rec.LastPushedStatus != "" {
+		t.Errorf("bookkeeping = %+v, want untouched for an unrecognized value", rec)
+	}
+
+	// Second occurrence of the same value is silent.
+	before := buf.len()
+	rd.rows = []readest.BookRow{mkStatusRow("h1", "on_hold", "2026-01-03T00:00:00Z")}
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if buf.len() != before {
+		t.Error("second occurrence of the same unrecognized value must not re-warn")
+	}
+}
+
+// statusLogBuf is a bytes.Buffer-like sink for the warn-once test. The engine
+// logs through slog; a *slog.TextHandler writing here lets the test count how
+// many WARN lines mention a given token without parsing structured records.
+type statusLogBuf struct {
+	mu sync.Mutex
+	b  []byte
+}
+
+func (b *statusLogBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.b = append(b.b, p...)
+	return len(p), nil
+}
+
+func (b *statusLogBuf) len() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.b)
+}
+
+func (b *statusLogBuf) countWarnsAbout(substr string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	lines := 0
+	for _, line := range strings.Split(string(b.b), "\n") {
+		if strings.Contains(line, "on_hold") && strings.Contains(line, substr) && strings.Contains(line, "unrecognized") {
+			lines++
+		}
+	}
+	return lines
 }

@@ -594,6 +594,130 @@ func TestUpdateProgressNetworkError(t *testing.T) {
 	}
 }
 
+// --- SetReadStatus() ---
+
+func TestSetReadStatusSuccess(t *testing.T) {
+	doer := &stubDoer{steps: []stubStep{{status: 200, body: `{"readStatus":"read"}`}}}
+	c := newTestClient(doer)
+
+	if err := c.SetReadStatus(context.Background(), 7, "read"); err != nil {
+		t.Fatalf("SetReadStatus: %v", err)
+	}
+}
+
+func TestSetReadStatusRequestShape(t *testing.T) {
+	doer := &stubDoer{steps: []stubStep{{status: 200, body: `{"readStatus":"read"}`}}}
+	c := newTestClient(doer)
+
+	if err := c.SetReadStatus(context.Background(), 42, "read"); err != nil {
+		t.Fatalf("SetReadStatus: %v", err)
+	}
+	req := doer.requests[0]
+	if req.Method != http.MethodPut {
+		t.Errorf("method = %q, want PUT", req.Method)
+	}
+	if req.URL.Path != "/api/v1/koreader/plugin/catalog/books/42/read-status" {
+		t.Errorf("path = %q", req.URL.Path)
+	}
+	body := doer.bodies[0]
+	if body != `{"status":"read"}` {
+		t.Errorf("body = %s, want exactly {\"status\":\"read\"}", body)
+	}
+	// Channel B carries no device wrapper: the server DTO is single-field and
+	// forbidNonWhitelisted would reject the extras with a 400.
+	for _, notWant := range []string{"deviceId", "deviceModel", "pluginVersion", "deviceTime"} {
+		if strings.Contains(body, notWant) {
+			t.Errorf("body = %s, must not carry device-wrapper key %q", body, notWant)
+		}
+	}
+	if got := req.Header.Get("x-auth-user"); got != "reader" {
+		t.Errorf("x-auth-user = %q", got)
+	}
+	if got := req.Header.Get("x-auth-key"); got != "authkey123" {
+		t.Errorf("x-auth-key = %q", got)
+	}
+	if got := req.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q", got)
+	}
+}
+
+func TestSetReadStatusSuccessfulEchoIsDecodedButNotRequiredForSuccess(t *testing.T) {
+	// Any well-formed JSON body is accepted on success; the echoed token is
+	// informational only.
+	doer := &stubDoer{steps: []stubStep{{status: 200, body: `{"readStatus":"abandoned"}`}}}
+	c := newTestClient(doer)
+	if err := c.SetReadStatus(context.Background(), 1, "abandoned"); err != nil {
+		t.Fatalf("SetReadStatus: %v", err)
+	}
+}
+
+func TestSetReadStatusErrorClassification(t *testing.T) {
+	cases := []struct {
+		status int
+		want   error
+	}{
+		// 404 on Channel B means "book gone / access revoked", NOT "endpoint
+		// unsupported". This is the one behavioral deviation from the shared
+		// classifier and is the pinning test for Mech-α (design §2 Decision H).
+		{404, ErrBookGone},
+		{400, ErrBadRequest},
+		{401, ErrUnauthorized},
+		{403, ErrUnauthorized},
+		{429, ErrRateLimited},
+		{500, ErrServer},
+		{503, ErrServer},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			doer := &stubDoer{steps: []stubStep{{status: tc.status, body: `{"message":"boom"}`}}}
+			cl := newTestClient(doer)
+
+			err := cl.SetReadStatus(context.Background(), 9, "read")
+			if !errors.Is(err, tc.want) {
+				t.Errorf("status %d: err = %v, want %v", tc.status, err, tc.want)
+			}
+			// Whatever the outcome, 404 must NEVER surface as
+			// ErrUnsupportedEndpoint here — that sentinel means "route missing"
+			// and would wrongly trigger the bulk-fallback logic in the engine.
+			if tc.status == 404 && errors.Is(err, ErrUnsupportedEndpoint) {
+				t.Errorf("404 must classify as ErrBookGone, not ErrUnsupportedEndpoint: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetReadStatusNetworkError(t *testing.T) {
+	doer := &stubDoer{steps: []stubStep{{err: errors.New("connection refused")}}}
+	c := newTestClient(doer)
+
+	err := c.SetReadStatus(context.Background(), 3, "read")
+	if !errors.Is(err, ErrNetwork) {
+		t.Errorf("err = %v, want ErrNetwork", err)
+	}
+}
+
+func TestSetReadStatusMalformedResponseBody(t *testing.T) {
+	doer := &stubDoer{steps: []stubStep{{status: 200, body: `{"readStatus":`}}}
+	c := newTestClient(doer)
+
+	err := c.SetReadStatus(context.Background(), 3, "read")
+	if !errors.Is(err, ErrMalformedResponse) {
+		t.Errorf("err = %v, want ErrMalformedResponse", err)
+	}
+}
+
+func TestSetReadStatusContextCancelled(t *testing.T) {
+	doer := &stubDoer{steps: []stubStep{{err: context.Canceled}}}
+	c := newTestClient(doer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := c.SetReadStatus(ctx, 3, "read")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want context.Canceled", err)
+	}
+}
+
 // --- Cross-cutting ---
 
 func TestNewClientNilLoggerDefaultsToSlogDefault(t *testing.T) {

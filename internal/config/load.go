@@ -140,6 +140,12 @@ func (c *Config) applyValues(v map[string]string) error {
 				return fmt.Errorf("bridge.unmatched_cooldown: %w", err)
 			}
 			c.Bridge.UnmatchedCooldown = d
+		case "bridge.sync_status":
+			b, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("bridge.sync_status: %w", err)
+			}
+			c.Bridge.SyncStatus = b
 		case "bridge.http_timeout":
 			d, err := time_ParseDuration(val)
 			if err != nil {

@@ -30,6 +30,41 @@ import (
 // (math.abs(pct - pushed) <= 0.001), verified in docs/phase-6-design.md §2.
 const percentTolerance = 0.001
 
+// mapReadingStatus is the Go port of the reference plugin's
+// library/readingstatus.lua READEST_TO_KO mapping collapsed to the one-way,
+// Channel-B-only shape the Phase 9 design defines. It returns the BookOrbit
+// Channel-B token to push and whether to push it at all:
+//
+//	"finished"   → ("read", true)         — exact semantic match
+//	"abandoned"  → ("abandoned", true)    — token-identical
+//	"unread"     → ("", false)            — decisive, but a documented no-op:
+//	                                          Channel B has no settable "unread"
+//	                                          token; unread is BookOrbit's
+//	                                          server-side baseline.
+//	"" / "reading" → ("", false)          — non-decisive: never synced, because
+//	                                          KOReader auto-sets "reading" on
+//	                                          first open and pushing it would
+//	                                          downgrade a finished book
+//	                                          (readingstatus.lua:5-9).
+//	anything else (incl. a future "on_hold") → ("", false) — fail-safe skip.
+//
+// The function is deliberately pure and state-free; the per-process
+// warn-once-per-unrecognized-value logging (Decision D) lives in the engine's
+// status step, not here.
+func mapReadingStatus(readestStatus string) (token string, push bool) {
+	switch readestStatus {
+	case "finished":
+		return "read", true
+	case "abandoned":
+		return "abandoned", true
+	default:
+		// "unread", "" / "reading", and any unrecognized future value all map
+		// to no-push. The caller distinguishes the warn-worthy case from the
+		// known non-decisive cases for logging.
+		return "", false
+	}
+}
+
 // Engine coordinates a one-way sync from Readest to BookOrbit.
 type Engine struct {
 	cfg    config.Config
@@ -45,6 +80,14 @@ type Engine struct {
 	// is cheap and avoids a state.Data schema change for a condition expected
 	// to be rare.
 	bulkUnsupported bool
+
+	// warnedStatusValues is the per-process dedup set for unrecognized Readest
+	// reading_status tokens (Phase 9, Decision D): each distinct unrecognized
+	// value is logged at WARN once, then silently skipped on subsequent
+	// appearances. Process-lifetime only (a restart re-warns once), matching
+	// the run-scoped bulkUnsupported field above rather than the persisted
+	// state store. Initialized in NewEngine; never nil.
+	warnedStatusValues map[string]bool
 
 	// now and sleep are injectable for deterministic tests, mirroring the
 	// convention already used by readest.Auth.now and bookorbit.Client.now.
@@ -78,6 +121,9 @@ func NewEngine(
 		log:    log,
 		now:    time.Now,
 		sleep:  defaultSleep,
+		// Initialized empty; the status step populates it lazily on the first
+		// unrecognized Readest reading_status token it encounters.
+		warnedStatusValues: make(map[string]bool),
 	}
 }
 
@@ -281,7 +327,156 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 		}
 	}
 
+	// --- Status-push phase (Phase 9) ---
+	// Gated opt-in per Decision F. Status is decoupled from the progress
+	// watermark (Decision E): it never appends to failedWatermarks and never
+	// touches LastPushedPct/LastPushedAt, so a status failure cannot stall
+	// progress. A BookOrbit auth failure aborts the rest of RunOnce the same
+	// way the match-check and push phases do (Decision E / Phase 6 §11).
+	if e.cfg.Bridge.SyncStatus {
+		fatal := e.pushStatuses(ctx, rows, now, &errs)
+		if fatal {
+			return e.finish(maxWatermark, failedWatermarks, errs)
+		}
+	}
+
 	return e.finish(maxWatermark, failedWatermarks, errs)
+}
+
+// pushStatuses walks every pulled row and, for each already-matched book,
+// pushes a changed decisive Readest reading_status to BookOrbit via the
+// per-book Channel B endpoint. It returns true to signal RunOnce should abort
+// immediately on a BookOrbit auth failure; every other outcome (skip, retryable
+// exhaustion, ErrBookGone drop) is per-book and non-fatal.
+//
+// Status push never triggers its own match-check and never touches the
+// progress watermark (Decision E): it rides on whatever match the match-check
+// phase resolved this poll or a prior one, skipping rows that are dummy,
+// deleted, unmatched, or have an unusable progress tuple — a row whose
+// percentage could not be computed also has no business asserting a status.
+func (e *Engine) pushStatuses(ctx context.Context, rows []readest.BookRow, now time.Time, errs *[]error) (fatal bool) {
+	for _, row := range rows {
+		if row.IsDummy() || row.IsDeleted() {
+			continue
+		}
+		if _, ok := row.Percentage(); !ok {
+			continue
+		}
+		rec, merr := e.st.Match(row.BookHash)
+		if merr != nil {
+			// Unmatched (or state-lookup failure): status push requires a
+			// resolved BookID, so the row is skipped. Never panics on a zero
+			// BookID because a present BookID is exactly what a resolved match
+			// supplies.
+			continue
+		}
+		if e.pushStatus(ctx, row, rec, now, errs) {
+			return true
+		}
+	}
+	return false
+}
+
+// pushStatus handles one row's status decision. The bool return is true when a
+// BookOrbit auth failure requires aborting the whole RunOnce.
+func (e *Engine) pushStatus(ctx context.Context, row readest.BookRow, rec state.MatchRecord, now time.Time, errs *[]error) (fatal bool) {
+	token, push := mapReadingStatus(row.ReadingStatus)
+	if !push {
+		// A non-push value is one of three kinds. The decisive-no-op "unread"
+		// and the known non-decisive values ("", "reading") are worth
+		// recording in the seen bookkeeping (so a later transition — e.g.
+		// unread→finished — diffs against the right baseline, Decision A). An
+		// unrecognized value (including a future on_hold token, Decision G) is
+		// warned about once per distinct value and recorded not at all: a token
+		// we do not understand is not a status we can claim to have processed.
+		switch classifyStatusValue(row.ReadingStatus) {
+		case statusValueKnown:
+			e.recordSeenStatus(row.BookHash, rec, row.ReadingStatus, now)
+		case statusValueUnrecognized:
+			if !e.warnedStatusValues[row.ReadingStatus] {
+				e.warnedStatusValues[row.ReadingStatus] = true
+				e.log.Warn("sync: unrecognized readest reading_status value",
+					"hash", row.BookHash, "reading_status", row.ReadingStatus)
+			}
+		}
+		return false
+	}
+
+	if token == rec.LastPushedStatus {
+		// Already current on BookOrbit: no SetReadStatus call, but still fold
+		// the seen bookkeeping forward so a later transition diffs against what
+		// Readest actually reported, not a stale baseline (Decision A).
+		e.recordSeenStatus(row.BookHash, rec, row.ReadingStatus, now)
+		return false
+	}
+
+	err := e.pushReadStatus(ctx, rec.BookID, token)
+	switch {
+	case err == nil:
+		rec.LastSeenStatus = row.ReadingStatus
+		rec.LastSeenStatusAt = now.Unix()
+		rec.LastPushedStatus = token
+		rec.LastPushedStatusAt = now.Unix()
+		e.st.SetMatch(row.BookHash, rec)
+		return false
+	case errors.Is(err, bookorbit.ErrBookGone):
+		// The cached bookId is stale (deleted from the library or filtered by
+		// content filters). Drop the book from the sync set exactly as the
+		// absent-from-match-check path does (Phase 6 ADR Addendum 2), and do
+		// NOT retreat the progress watermark (Decision E).
+		e.st.DeleteMatch(row.BookHash)
+		e.st.SetUnmatched(row.BookHash, now.Unix())
+		return false
+	case errors.Is(err, bookorbit.ErrUnauthorized):
+		*errs = append(*errs, fmt.Errorf("sync: set-read-status: %w", err))
+		return true
+	default:
+		// ErrBadRequest is a bridge logic bug; a retryable error exhausted its
+		// backoff. Either way: skip this book this poll. LastPushedStatus stays
+		// put (not advanced), so next poll the mapped value still differs and is
+		// retried (Decision E). The progress watermark is untouched.
+		*errs = append(*errs, fmt.Errorf("sync: set-read-status: %w", err))
+		return false
+	}
+}
+
+// recordSeenStatus advances the Readest-side seen bookkeeping for a row that
+// produced no BookOrbit call (decisive-no-op or unchanged), preserving the
+// pushed-side fields unchanged. It writes back via SetMatch only when the seen
+// value actually changed, so a steady-state poll is a no-op.
+func (e *Engine) recordSeenStatus(hash string, rec state.MatchRecord, seen string, now time.Time) {
+	if rec.LastSeenStatus == seen {
+		return
+	}
+	rec.LastSeenStatus = seen
+	rec.LastSeenStatusAt = now.Unix()
+	e.st.SetMatch(hash, rec)
+}
+
+// statusValueKind distinguishes the three ways a non-push Readest
+// reading_status value is handled in the status step.
+type statusValueKind int
+
+const (
+	// statusValueKnown is a recognized non-push value ("" / "reading" /
+	// "unread"): skip the push but record the seen bookkeeping.
+	statusValueKnown statusValueKind = iota
+	// statusValueUnrecognized is any other value (a future schema-drift token
+	// such as a hypothetical on_hold): warn once and record nothing.
+	statusValueUnrecognized
+)
+
+// classifyStatusValue reports how a non-push Readest status value is handled.
+// The decisive-push values never reach here (mapReadingStatus already returned
+// push=true for them); this splits the remaining space into "record the seen
+// bookkeeping" versus "warn once and record nothing".
+func classifyStatusValue(s string) statusValueKind {
+	switch s {
+	case "", "reading", "unread":
+		return statusValueKnown
+	default:
+		return statusValueUnrecognized
+	}
 }
 
 // finish computes the final watermark, persists state exactly once, and
@@ -367,12 +562,13 @@ func (e *Engine) pushChunk(ctx context.Context, chunk []pushItem, failedWatermar
 			e.st.DeleteMatch(p.hash)
 			continue
 		}
-		e.st.SetMatch(p.hash, state.MatchRecord{
-			BookFileID:    p.rec.BookFileID,
-			BookID:        p.rec.BookID,
-			LastPushedAt:  e.now().Unix(),
-			LastPushedPct: p.pct,
-		})
+		// Preserve the Phase 9 status bookkeeping (LastSeenStatus*,
+		// LastPushedStatus*) already on p.rec: a progress push updates only the
+		// progress fields and must not reset the status baseline.
+		rec := p.rec
+		rec.LastPushedAt = e.now().Unix()
+		rec.LastPushedPct = p.pct
+		e.st.SetMatch(p.hash, rec)
 	}
 	return false
 }
@@ -392,12 +588,12 @@ func (e *Engine) pushSingle(ctx context.Context, p pushItem, errs *[]error) {
 		*errs = append(*errs, fmt.Errorf("sync: update-progress: %w", err))
 		return
 	}
-	e.st.SetMatch(p.hash, state.MatchRecord{
-		BookFileID:    p.rec.BookFileID,
-		BookID:        p.rec.BookID,
-		LastPushedAt:  e.now().Unix(),
-		LastPushedPct: p.pct,
-	})
+	// Preserve the Phase 9 status bookkeeping on p.rec, exactly as pushChunk
+	// does: a progress push updates only the progress fields.
+	rec := p.rec
+	rec.LastPushedAt = e.now().Unix()
+	rec.LastPushedPct = p.pct
+	e.st.SetMatch(p.hash, rec)
 }
 
 // updatedSeconds returns row.UpdatedMs() converted to Unix epoch seconds, or
@@ -538,4 +734,41 @@ func (e *Engine) updateProgress(ctx context.Context, req bookorbit.UpdateProgres
 	return withRetry(ctx, e.cfg.Bridge, e.sleep, func() error {
 		return e.bo.UpdateProgress(ctx, req)
 	}, classifyBookOrbitErr)
+}
+
+// classifyBookOrbitStatusErr maps a SetReadStatus error to a retry verdict for
+// the status-push step. It is a distinct classifier from classifyBookOrbitErr
+// (Phase 9, Decision H / §3.4): bookorbit.ErrBookGone has no withRetry verdict
+// — it is handled inline by pushStatus, which branches on errors.Is(err,
+// ErrBookGone) BEFORE withRetry ever runs, so this classifier is only ever
+// asked to judge the non-gone cases. Should ErrBookGone ever reach it
+// (defense-in-depth), it returns outcomeSkip, which is correct by
+// definition: a stale bookId can never succeed on retry.
+func classifyBookOrbitStatusErr(err error) outcome {
+	switch {
+	case err == nil:
+		return outcomeSuccess
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return outcomeFatal
+	case errors.Is(err, bookorbit.ErrUnauthorized):
+		return outcomeFatal
+	case errors.Is(err, bookorbit.ErrBookGone),
+		errors.Is(err, bookorbit.ErrBadRequest):
+		return outcomeSkip
+	case errors.Is(err, bookorbit.ErrRateLimited), errors.Is(err, bookorbit.ErrServer), errors.Is(err, bookorbit.ErrNetwork):
+		return outcomeRetry
+	default:
+		return outcomeRetry
+	}
+}
+
+// pushReadStatus pushes one book's read-status token via the Channel B
+// endpoint, with the status-specific retry classification (Decision E /
+// Decision H). Like the other gateways, transient errors are retried with the
+// configured backoff; the caller (pushStatus) decides what a returned error
+// means for the row's bookkeeping.
+func (e *Engine) pushReadStatus(ctx context.Context, bookID int64, token string) error {
+	return withRetry(ctx, e.cfg.Bridge, e.sleep, func() error {
+		return e.bo.SetReadStatus(ctx, bookID, token)
+	}, classifyBookOrbitStatusErr)
 }

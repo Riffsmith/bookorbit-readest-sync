@@ -74,6 +74,13 @@ type BridgeConfig struct {
 	// fresh match-check is attempted.
 	UnmatchedCooldown time.Duration `yaml:"unmatched_cooldown"`
 
+	// SyncStatus gates the optional Readest → BookOrbit reading-status push
+	// (Phase 9). Off by default: unlike progress (purely informational), a
+	// status write changes what the operator's BookOrbit catalog displays as
+	// the book's state, so it is opt-in. See docs/phase-9-status-sync-design.md
+	// Decision F.
+	SyncStatus bool `yaml:"sync_status"`
+
 	// HTTPTimeout is the per-request timeout for API calls.
 	HTTPTimeout time.Duration `yaml:"http_timeout"`
 	// RetryMaxAttempts bounds transient-failure retries per request.

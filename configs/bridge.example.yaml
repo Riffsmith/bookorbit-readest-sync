@@ -20,6 +20,7 @@
 #   BRIDGE_LOG_LEVEL                bridge.log_level
 #   BRIDGE_LOG_FORMAT               bridge.log_format
 #   BRIDGE_STATE_FILE               bridge.state_file
+#   BRIDGE_SYNC_STATUS              bridge.sync_status
 
 readest:
   # Your Readest account credentials (required). Prefer env vars for these.
@@ -67,6 +68,11 @@ bridge:
   # match_batch_size: 500        # hashes per match-check request
   # progress_batch_size: 100     # items per bulk-progress request
   # max_body_bytes: 921600       # 900 KiB request body cap
+
+  # Push Readest reading-status changes — finished/abandoned — to BookOrbit.
+  # Off by default because, unlike progress, this edits what your BookOrbit
+  # catalog displays. Accepts true/false (or 1/0, yes/no, on/off).
+  # sync_status: false
 
   # How long an unmatched hash is skipped before re-checking.
   # unmatched_cooldown: "24h"

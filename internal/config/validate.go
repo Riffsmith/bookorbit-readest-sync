@@ -67,6 +67,8 @@ func (c *Config) Validate() error {
 	if c.Bridge.RetryMaxAttempts < 0 {
 		problems = append(problems, "bridge.retry_max_attempts must not be negative")
 	}
+	// bridge.sync_status (a bool, Phase 9) carries no cross-field invariant: any
+	// parsed value is valid, so there is intentionally nothing to check here.
 
 	if len(problems) > 0 {
 		return &ValidationError{Problems: problems}

@@ -97,6 +97,56 @@ func TestBooksResponseDecoding(t *testing.T) {
 	}
 }
 
+func TestBookRowReadingStatusFieldsDecode(t *testing.T) {
+	// A row carrying reading_status / reading_status_updated_at decodes both
+	// fields straight off the bulk-pull wire (Phase 9 design §3.1). The
+	// reading-status timestamp arrives as an ISO-8601 string and is stored
+	// raw, matching the convention of updated_at/deleted_at/synced_at.
+	body := `{"books":[{"book_hash":"h1","reading_status":"finished","reading_status_updated_at":"2026-06-18T00:00:00+00:00"}]}`
+	var resp BooksResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		t.Fatalf("decode BooksResponse: %v", err)
+	}
+	if len(resp.Books) != 1 {
+		t.Fatalf("decoded books len = %d, want 1", len(resp.Books))
+	}
+	row := resp.Books[0]
+	if row.ReadingStatus != "finished" {
+		t.Errorf("ReadingStatus = %q, want finished", row.ReadingStatus)
+	}
+	if row.ReadingStatusUpdatedAt != "2026-06-18T00:00:00+00:00" {
+		t.Errorf("ReadingStatusUpdatedAt = %q, want raw ISO string", row.ReadingStatusUpdatedAt)
+	}
+	// The raw ISO string must parse via the existing ISOToMs port, pinning the
+	// exact conversion the engine would apply if it ever needed the ms value.
+	if _, err := util.ISOToMs(row.ReadingStatusUpdatedAt); err != nil {
+		t.Errorf("ReadingStatusUpdatedAt must parse via ISOToMs: %v", err)
+	}
+}
+
+func TestBookRowReadingStatusFieldsAbsentDecodeEmpty(t *testing.T) {
+	// Rows for books that have never had a reading status set carry
+	// absent (or null) reading_status / reading_status_updated_at. Both must
+	// decode to "" without error — the same tolerance discipline already
+	// applied to a null progress tuple (TestProgressTupleDecoding).
+	for _, body := range []string{
+		`{"books":[{"book_hash":"h1"}]}`,
+		`{"books":[{"book_hash":"h1","reading_status":null,"reading_status_updated_at":null}]}`,
+	} {
+		var resp BooksResponse
+		if err := json.Unmarshal([]byte(body), &resp); err != nil {
+			t.Fatalf("decode %s: %v", body, err)
+		}
+		row := resp.Books[0]
+		if row.ReadingStatus != "" {
+			t.Errorf("ReadingStatus = %q, want empty", row.ReadingStatus)
+		}
+		if row.ReadingStatusUpdatedAt != "" {
+			t.Errorf("ReadingStatusUpdatedAt = %q, want empty", row.ReadingStatusUpdatedAt)
+		}
+	}
+}
+
 func TestTokenFreshnessRules(t *testing.T) {
 	tok := Token{ExpiresAt: 1000, ExpiresIn: 600}
 

@@ -215,6 +215,96 @@ func TestEnvSupabaseAnonKeyRawPassthroughWhenNotBase64(t *testing.T) {
 	}
 }
 
+// TestSyncStatusDefaultsFalse pins the opt-in default: with neither file nor
+// env set, SyncStatus is false (Decision F). A status write edits what the
+// BookOrbit catalog displays, so off-by-default is the safe posture.
+func TestSyncStatusDefaultsFalse(t *testing.T) {
+	setRequiredEnv(t)
+	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	if !errors.Is(err, ErrNoConfigFile) {
+		t.Fatalf("Load err = %v, want ErrNoConfigFile", err)
+	}
+	if cfg.Bridge.SyncStatus {
+		t.Error("SyncStatus should default to false (opt-in)")
+	}
+}
+
+// TestSyncStatusFromFile exercises the YAML `bridge.sync_status` key.
+func TestSyncStatusFromFile(t *testing.T) {
+	setRequiredEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bridge.yaml")
+	doc := `
+readest:
+  email: "file@example.com"
+  password: "filepass"
+bookorbit:
+  server_url: "http://nas:8080"
+  username: "reader"
+  password: "bpass"
+bridge:
+  sync_status: true
+`
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if !cfg.Bridge.SyncStatus {
+		t.Error("SyncStatus = false, want true from file")
+	}
+}
+
+// TestSyncStatusEnvOverridesFile exercises the BRIDGE_SYNC_STATUS override and
+// the new setBool helper: a non-empty env value wins over the file.
+func TestSyncStatusEnvOverridesFile(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv(EnvSyncStatus, "false")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(path, []byte("bridge:\n  sync_status: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load error: %v", err)
+	}
+	if cfg.Bridge.SyncStatus {
+		t.Error("SyncStatus = true, want env override to false")
+	}
+}
+
+// TestSyncStatusEnvInvalidValueIgnored: an unparseable env value is ignored
+// (the config file / default wins), matching the lenient duration-override
+// convention — an invalid value never blocks startup.
+func TestSyncStatusEnvInvalidValueIgnored(t *testing.T) {
+	setRequiredEnv(t)
+	t.Setenv(EnvSyncStatus, "not-a-bool")
+	cfg, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	if !errors.Is(err, ErrNoConfigFile) {
+		t.Fatalf("Load err = %v, want ErrNoConfigFile", err)
+	}
+	if cfg.Bridge.SyncStatus {
+		t.Error("SyncStatus = true after invalid env value, want false (ignored)")
+	}
+}
+
+// TestSyncStatusFileInvalidValueRejected: an unparseable *file* value is a
+// hard error, consistent with every other typed key's error wrapping.
+func TestSyncStatusFileInvalidValueRejected(t *testing.T) {
+	setRequiredEnv(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bridge.yaml")
+	if err := os.WriteFile(path, []byte("bridge:\n  sync_status: maybe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid bridge.sync_status value")
+	}
+}
+
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv(EnvReadestEmail, "test@example.com")
