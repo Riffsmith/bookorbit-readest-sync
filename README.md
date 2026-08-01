@@ -90,4 +90,4 @@ For protocols and internals, see `docs/reverse-engineering-report.md` and
 
 ## License
 
-AGPL 3: [[./LICENSE]]
+AGPL 3: [[LICENSE](./LICENSE)
