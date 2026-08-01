@@ -34,6 +34,7 @@ inside prose ADR addenda and `live-test-reports.md`.
 | Daemon-mode entry, `mode:"daemon"` tag correctness, cancellation propagation via SIGINT | Phase 7 §4.2 (claimed, not live-tested) | Test 6 | Confirmed against the real binary and a real OS signal; prompt exit, clean "shutdown requested; exiting" log line, state preserved. |
 | Idempotent re-run / converged-state behavior | Phase 6 §5.4 watermark-advance invariant | Test 1 | Immediate second `--once` run was near-instant and near-silent. |
 | Positive match-check path end-to-end (book in both libraries) | Phase 6 §6.2/§6.3 | Test 4 | Fresh match, correct push, correct dashboard display, no double-push on re-run. |
+| Status sync correctly handles null-progress decisive-status rows (Phase 10 fix) | Phase 10 design (`docs/phase-10-status-sync-decoupling-design.md`); operator live report 2026-08-02 | Unit tests `TestRunOnceNullProgressFinishedBookStatusPushes`, `TestRunOnceNullProgressThenOpensBookPushesProgressToo`, `TestRunOnceMixedProgressAndStatusRowsUseSingleMatchCheckBatch` | Phase 10 decoupled status from progress so a book downloaded then marked "finished" without ever being opened (`progress: null, reading_status: "finished"`) reaches MatchCheck through the unified status-eligibility path and is status-pushed on the very first poll. Live confirmation run is the operator delete-state-file + `BRIDGE_SYNC_STATUS=true BRIDGE_LOG_LEVEL=debug ./bin/bridge --once` sequence in `docs/adr/phase-10-decision-record.md` — tracked as a "resolved-on-confirmation" item pending that run. |
 
 ---
 

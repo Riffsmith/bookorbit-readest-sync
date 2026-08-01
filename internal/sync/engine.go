@@ -202,29 +202,74 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 			continue
 		}
 
-		pct, ok := row.Percentage()
-		if !ok {
-			continue
+		// Phase 10: status sync is decoupled from progress. A row is
+		// eligible for the match-check phase if EITHER it has a usable
+		// progress tuple (the historical Phase 6 path) OR it carries a
+		// decisive Readest reading_status the bridge maps to a push
+		// token (the Phase 10 path). A single unified MatchCheck pass
+		// resolves hashes for both — no per-channel duplication. The two
+		// predicates are computed below as progressEligible and
+		// statusEligible, ORed together to dedup the row into toMatch.
+		progressEligible := false
+		statusEligible := false
+
+		pct, hasPct := row.Percentage()
+		if hasPct {
+			rec, merr := e.st.Match(row.BookHash)
+			switch {
+			case merr == nil:
+				if rec.LastPushedAt != 0 && math.Abs(pct-rec.LastPushedPct) <= percentTolerance {
+					// Unchanged percentage: don't enqueue a progress
+					// push, but the row may still need match-check if
+					// status-eligible below.
+				} else {
+					toPush = append(toPush, pushItem{
+						hash: row.BookHash, rec: rec, pct: pct,
+						ts: updatedSeconds(row, now.Unix()), wm: wm,
+					})
+				}
+			case errors.Is(merr, state.ErrNotFound):
+				at, inCooldown := e.st.UnmatchedAt(row.BookHash)
+				if inCooldown && now.Unix()-at < int64(e.cfg.Bridge.UnmatchedCooldown.Seconds()) {
+					// In cooldown: progress won't recheck this poll,
+					// but a decisive status may still be eligible
+					// below if the book is somehow matched already.
+				} else {
+					progressEligible = true
+				}
+			default:
+				e.log.Warn("sync: unexpected state.Match error", "hash", row.BookHash, "error", merr)
+			}
 		}
 
-		rec, merr := e.st.Match(row.BookHash)
-		switch {
-		case merr == nil:
-			if rec.LastPushedAt != 0 && math.Abs(pct-rec.LastPushedPct) <= percentTolerance {
-				continue
+		// Status eligibility (Phase 10, Decision I/II). A null-progress
+		// row can still carry a decisive reading_status the bridge needs
+		// to push; match-check is the unified on-ramp for both channels.
+		// Only decisive-PUSH values (finished/abandoned) short-circuit
+		// into the match queue; non-push values are handled by the
+		// status step using whatever match is already cached.
+		if e.cfg.Bridge.SyncStatus {
+			if _, push := mapReadingStatus(row.ReadingStatus); push {
+				if _, merr := e.st.Match(row.BookHash); errors.Is(merr, state.ErrNotFound) {
+					at, inCooldown := e.st.UnmatchedAt(row.BookHash)
+					if !(inCooldown && now.Unix()-at < int64(e.cfg.Bridge.UnmatchedCooldown.Seconds())) {
+						// Dedup against progressEligible: if the row
+						// already queued for progress this poll, don't
+						// add it a second time.
+						if !progressEligible {
+							statusEligible = true
+						}
+					}
+				}
+				// (The merr==nil and unexpected-error branches are
+				// handled: a present match means the status step will
+				// use it directly; an unexpected state error is logged
+				// above in the progress branch.)
 			}
-			toPush = append(toPush, pushItem{
-				hash: row.BookHash, rec: rec, pct: pct,
-				ts: updatedSeconds(row, now.Unix()), wm: wm,
-			})
-		case errors.Is(merr, state.ErrNotFound):
-			at, inCooldown := e.st.UnmatchedAt(row.BookHash)
-			if inCooldown && now.Unix()-at < int64(e.cfg.Bridge.UnmatchedCooldown.Seconds()) {
-				continue
-			}
+		}
+
+		if progressEligible || statusEligible {
 			toMatch = append(toMatch, row)
-		default:
-			e.log.Warn("sync: unexpected state.Match error", "hash", row.BookHash, "error", merr)
 		}
 	}
 
@@ -343,23 +388,25 @@ func (e *Engine) RunOnce(ctx context.Context) error {
 	return e.finish(maxWatermark, failedWatermarks, errs)
 }
 
-// pushStatuses walks every pulled row and, for each already-matched book,
-// pushes a changed decisive Readest reading_status to BookOrbit via the
-// per-book Channel B endpoint. It returns true to signal RunOnce should abort
+// pushStatuses walks every pulled row and, for each matched book, pushes a
+// changed decisive Readest reading_status to BookOrbit via the per-book
+// Channel B endpoint. It returns true to signal RunOnce should abort
 // immediately on a BookOrbit auth failure; every other outcome (skip, retryable
 // exhaustion, ErrBookGone drop) is per-book and non-fatal.
 //
-// Status push never triggers its own match-check and never touches the
-// progress watermark (Decision E): it rides on whatever match the match-check
-// phase resolved this poll or a prior one, skipping rows that are dummy,
-// deleted, unmatched, or have an unusable progress tuple — a row whose
-// percentage could not be computed also has no business asserting a status.
+// Phase 10: status sync is decoupled from progress. This step no longer
+// requires row.Percentage() to succeed — a row carrying a decisive
+// reading_status but no usable progress tuple (e.g. a finished-but-never-opened
+// book with progress=null) is eligible for status push exactly as any other.
+// The progress classification loop (above) routes such rows into the unified
+// match-check queue via the statusEligible predicate, and the match record the
+// status step reads here carries the BookID the match-check phase resolved.
+// Progress and status remain semantically independent write channels per
+// Decision E: status never appends to failedWatermarks and never touches
+// LastPushedPct/LastPushedAt.
 func (e *Engine) pushStatuses(ctx context.Context, rows []readest.BookRow, now time.Time, errs *[]error) (fatal bool) {
 	for _, row := range rows {
 		if row.IsDummy() || row.IsDeleted() {
-			continue
-		}
-		if _, ok := row.Percentage(); !ok {
 			continue
 		}
 		rec, merr := e.st.Match(row.BookHash)

@@ -1013,6 +1013,23 @@ func mkStatusRow(hash, status, updatedAt string) readest.BookRow {
 	return row
 }
 
+// mkNoProgressRow constructs a BookRow with null progress (the wire form for a
+// book the user has never opened) and an optional reading_status. It is the
+// Phase 10 regression-test fixture: the user-reported bug was that a
+// download-then-Mark-as-finished book (progress=null, reading_status=
+// "finished") was silently dropped before status sync could see it. The
+// Progress field is left as nil json.RawMessage (identical to a Server-returned
+// JSON null), which decodeProgressTuple correctly treats as no usable tuple.
+func mkNoProgressRow(hash, status, updatedAt string) readest.BookRow {
+	return readest.BookRow{
+		BookHash:      hash,
+		ReadingStatus: status,
+		UpdatedAt:     updatedAt,
+		SyncedAt:      updatedAt, // ensures WatermarkMs picks up the row
+		Title:         "Test Book " + hash,
+	}
+}
+
 // newStatusTestEngine builds an engine with SyncStatus enabled. Tests that
 // specifically exercise the gate use newTestEngine (SyncStatus=false default)
 // instead.
@@ -1470,4 +1487,289 @@ func (b *statusLogBuf) countWarnsAbout(substr string) int {
 		}
 	}
 	return lines
+}
+
+// --- Phase 10 regression guards: null-progress decisive-status rows ---
+//
+// Phase 10 fixes a two-layer bug surfaced by the operator against a live
+// Readest library: a book downloaded from BookOrbit's OPDS and then marked
+// "finished" in Readest without ever being opened renders on the wire as
+// {progress: null, reading_status: "finished"}. The shipped Phase 9 engine
+// skipped such rows at the row-classification phase (before match-check)
+// AND inside pushStatuses, so the decisive status was never matched, never
+// pushed, and — once the watermark advanced past the row's synced_at — never
+// visible to incremental pulls again. These three tests pin the post-Phase-10
+// contract: status sync is decoupled from progress; a null-progress decisive
+// row reaches match-check through the status path; the status step accepts
+// it without re-imposing the progress gate.
+
+// TestRunOnceNullProgressFinishedBookStatusPushes is the regression guard
+// for the operator's exact reported scenario. A row with progress=null and
+// reading_status="finished" must, in one RunOnce with SyncStatus enabled:
+//
+//   - reach MatchCheck exactly once (via the statusEligible path; the
+//     progress-eligible path correctly does nothing because there is no
+//     progress tuple to push),
+//   - produce exactly one SetReadStatus call with the mapped (bookID, "read"),
+//   - record LastSeenStatus="finished" and LastPushedStatus="read" on the
+//     MatchRecord, with LastPushedPct left at zero (no progress was ever
+//     pushed for this book),
+//   - make zero BulkProgress / UpdateProgress calls (no progress data to
+//     push), and
+//   - on a second RunOnce with the same rows, make zero further calls
+//     (the unchanged-skip in the status step fires because LastPushedStatus
+//     already equals "read").
+func TestRunOnceNullProgressFinishedBookStatusPushes(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{
+		mkNoProgressRow("h1", "finished", "2026-08-01T08:44:39Z"),
+	}}
+	bo := &fakeBookOrbit{
+		matchResp: bookorbit.MatchCheckResponse{
+			Matches: []bookorbit.Match{
+				{Hash: "h1", BookFileID: 1, BookID: 11},
+			},
+		},
+	}
+	st := state.NewMemStore()
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if bo.matchCalls != 1 {
+		t.Errorf("matchCalls = %d, want 1 (null-progress decisive row must reach MatchCheck via status path)", bo.matchCalls)
+	}
+	if bo.bulkCalls != 0 || bo.updateCalls != 0 {
+		t.Errorf("progress calls = bulk:%d update:%d, want 0/0 (no progress tuple means no progress push)", bo.bulkCalls, bo.updateCalls)
+	}
+	if len(bo.statusCalls) != 1 {
+		t.Fatalf("statusCalls = %d, want 1", len(bo.statusCalls))
+	}
+	if bo.statusCalls[0].bookID != 11 || bo.statusCalls[0].token != "read" {
+		t.Errorf("SetReadStatus(%d,%q), want (11,read)", bo.statusCalls[0].bookID, bo.statusCalls[0].token)
+	}
+	rec, merr := st.Match("h1")
+	if merr != nil {
+		t.Fatalf("Match(h1) after RunOnce: %v", merr)
+	}
+	if rec.LastSeenStatus != "finished" {
+		t.Errorf("LastSeenStatus = %q, want finished", rec.LastSeenStatus)
+	}
+	if rec.LastPushedStatus != "read" {
+		t.Errorf("LastPushedStatus = %q, want read", rec.LastPushedStatus)
+	}
+	if rec.LastPushedPct != 0 {
+		t.Errorf("LastPushedPct = %v, want 0 (no progress ever pushed for this book)", rec.LastPushedPct)
+	}
+	if rec.LastPushedAt != 0 {
+		t.Errorf("LastPushedAt = %v, want 0 (no progress ever pushed for this book)", rec.LastPushedAt)
+	}
+
+	// Second run: status unchanged → unchanged-skip fires; zero calls of any
+	// kind (no progress to push, no status change, no need to recheck match).
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if bo.matchCalls != 1 {
+		t.Errorf("matchCalls = %d after second run, want 1 (already-matched, in-cooldown-or-current)", bo.matchCalls)
+	}
+	if bo.bulkCalls != 0 || bo.updateCalls != 0 {
+		t.Errorf("progress calls after second run = bulk:%d update:%d, want 0/0", bo.bulkCalls, bo.updateCalls)
+	}
+	if len(bo.statusCalls) != 1 {
+		t.Errorf("statusCalls = %d after second run, want 1 (unchanged-skip should fire; no new call)", len(bo.statusCalls))
+	}
+}
+
+// TestRunOnceNullProgressThenOpensBookPushesProgressToo tests the decoupling
+// "future-tense" direction: a book that was status-pushed on a null-progress
+// poll, then later opened by the reader and progressed, should have BOTH
+// (a) its progress pushed (LastPushedPct was 0 → real pct differs by more
+// than the tolerance, so the progress path enqueues a push), AND (b) its
+// status unchanged-skipped (LastPushedStatus already equals "read"). The
+// state set during Run 1's status phase must NOT be reset by Run 2's progress
+// push — the Phase 9 ADR's "preserve status bookkeeping on progress push"
+// invariant continues to hold for null-progress-then-progressed rows.
+func TestRunOnceNullProgressThenOpensBookPushesProgressToo(t *testing.T) {
+	// Run 1: null progress, reading_status="finished"
+	rd := &fakeReadest{rows: []readest.BookRow{
+		mkNoProgressRow("h1", "finished", "2026-08-01T08:44:39Z"),
+	}}
+	bo := &fakeBookOrbit{
+		matchResp: bookorbit.MatchCheckResponse{
+			Matches: []bookorbit.Match{
+				{Hash: "h1", BookFileID: 1, BookID: 11},
+			},
+		},
+	}
+	st := state.NewMemStore()
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("phase 1 RunOnce: %v", err)
+	}
+	if len(bo.statusCalls) != 1 || bo.statusCalls[0].token != "read" {
+		t.Errorf("phase 1 statusCalls = %+v, want one (read) call", bo.statusCalls)
+	}
+	if bo.bulkCalls != 0 || bo.updateCalls != 0 {
+		t.Errorf("phase 1 progress pushes = bulk:%d update:%d, want 0/0 (no progress yet)", bo.bulkCalls, bo.updateCalls)
+	}
+
+	// Run 2: same book, now the reader turned pages → progress=[3, 5167].
+	// reading_status="finished" unchanged. The match is cached, so no
+	// match-check should run; only the progress-push path should fire.
+	matchCallsBeforeRun2 := bo.matchCalls
+	rd.rows = []readest.BookRow{
+		{
+			BookHash:      "h1",
+			Progress:      json.RawMessage("[3,5167]"),
+			ReadingStatus: "finished",
+			UpdatedAt:     "2026-08-01T10:00:00Z",
+			SyncedAt:      "2026-08-01T10:00:01Z",
+			Title:         "Test Book h1",
+		},
+	}
+	bo.statusCalls = nil // reset for run 2 assertions
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("phase 2 RunOnce: %v", err)
+	}
+	if bo.matchCalls != matchCallsBeforeRun2 {
+		t.Errorf("phase 2 matchCalls = %d, want %d (match cached, no recheck)", bo.matchCalls, matchCallsBeforeRun2)
+	}
+	if len(bo.statusCalls) != 0 {
+		t.Errorf("phase 2 statusCalls = %d, want 0 (LastPushedStatus==read → unchanged-skip)", len(bo.statusCalls))
+	}
+	// Progress must have been pushed: Phase 6 path, BulkProgress with one item.
+	if bo.bulkCalls != 1 {
+		t.Errorf("phase 2 bulkCalls = %d, want 1 (pct moved from 0 to ~0.00058)", bo.bulkCalls)
+	}
+	if bo.updateCalls != 0 {
+		t.Errorf("phase 2 updateCalls = %d, want 0 (bulk endpoint is supported in this fake)", bo.updateCalls)
+	}
+	if len(bo.bulkItems) != 1 || bo.bulkItems[0].Hash != "h1" {
+		t.Errorf("phase 2 bulkItems = %+v, want one item for h1", bo.bulkItems)
+	}
+	// The crucial Phase 9 invariant (preserved by Phase 10): the progress
+	// push must not have reset the status bookkeeping. LastPushedStatus must
+	// still be "read"; only LastPushedPct/LastPushedAt advanced.
+	rec, merr := st.Match("h1")
+	if merr != nil {
+		t.Fatalf("Match(h1) after phase 2: %v", merr)
+	}
+	if rec.LastPushedStatus != "read" {
+		t.Errorf("phase 2 LastPushedStatus = %q, want read (progress push must not reset status)", rec.LastPushedStatus)
+	}
+	if rec.LastSeenStatus != "finished" {
+		t.Errorf("phase 2 LastSeenStatus = %q, want finished (progress push must not reset seen)", rec.LastSeenStatus)
+	}
+	if rec.LastPushedPct == 0 {
+		t.Error("phase 2 LastPushedPct = 0, want non-zero (progress was just pushed)")
+	}
+}
+
+// TestRunOnceMixedProgressAndStatusRowsUseSingleMatchCheckBatch pins
+// Decision II from the Phase 10 design: a row eligible for EITHER progress OR
+// status sync is enqueued into a single unified MatchCheck batch — never two
+// batches, never one row missing the queue.
+//
+//   - Row A: progress-bearing, no status → progress-eligible only
+//   - Row B: null progress, reading_status="finished" → status-eligible only
+//   - Row C: progress-bearing AND reading_status="finished" → both eligible
+//     (must be deduped to a single MatchCheck entry)
+//
+// Expected: exactly one MatchCheck call with all three unique hashes; one
+// BulkProgress call containing exactly rows A and C (B has no progress to
+// push); one (or two) SetReadStatus calls for B and C (A has no decisive
+// status).
+func TestRunOnceMixedProgressAndStatusRowsUseSingleMatchCheckBatch(t *testing.T) {
+	rd := &fakeReadest{rows: []readest.BookRow{
+		{
+			BookHash:  "hA",
+			Progress:  json.RawMessage("[5,100]"),
+			UpdatedAt: "2026-08-01T08:00:00Z",
+			SyncedAt:  "2026-08-01T08:00:01Z",
+			Title:     "A progress only",
+		},
+		{
+			BookHash:      "hB",
+			Progress:      nil, // null progress — the operator's scenario
+			ReadingStatus: "finished",
+			UpdatedAt:     "2026-08-01T08:00:00Z",
+			SyncedAt:      "2026-08-01T08:00:01Z",
+			Title:         "B status only",
+		},
+		{
+			BookHash:      "hC",
+			Progress:      json.RawMessage("[7,200]"),
+			ReadingStatus: "finished",
+			UpdatedAt:     "2026-08-01T08:00:00Z",
+			SyncedAt:      "2026-08-01T08:00:01Z",
+			Title:         "C both",
+		},
+	}}
+	bo := &fakeBookOrbit{
+		matchResp: bookorbit.MatchCheckResponse{
+			Matches: []bookorbit.Match{
+				{Hash: "hA", BookFileID: 1, BookID: 11},
+				{Hash: "hB", BookFileID: 2, BookID: 22},
+				{Hash: "hC", BookFileID: 3, BookID: 33},
+			},
+		},
+	}
+	st := state.NewMemStore()
+	e := newStatusTestEngine(rd, bo, st)
+
+	if err := e.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Decision II: one MatchCheck call carrying all three unique hashes.
+	if bo.matchCalls != 1 {
+		t.Fatalf("matchCalls = %d, want 1 (unified batch)", bo.matchCalls)
+	}
+	if len(bo.matchReq.Hashes) != 3 {
+		t.Errorf("matchReq.Hashes length = %d, want 3 (A,B,C deduped into one batch)", len(bo.matchReq.Hashes))
+	}
+	seenHashes := map[string]bool{}
+	for _, h := range bo.matchReq.Hashes {
+		seenHashes[h] = true
+	}
+	for _, want := range []string{"hA", "hB", "hC"} {
+		if !seenHashes[want] {
+			t.Errorf("matchReq.Hashes missing %q (got %+v)", want, bo.matchReq.Hashes)
+		}
+	}
+
+	// Progress: only A and C pushed (B has no progress tuple).
+	if bo.bulkCalls != 1 {
+		t.Errorf("bulkCalls = %d, want 1 (single bulk batch with A and C)", bo.bulkCalls)
+	}
+	if len(bo.bulkItems) != 2 {
+		t.Errorf("bulkItems count = %d, want 2 (hA and hC only; hB has no progress)", len(bo.bulkItems))
+	}
+	pushedHashes := map[string]bool{}
+	for _, item := range bo.bulkItems {
+		pushedHashes[item.Hash] = true
+	}
+	if !pushedHashes["hA"] || !pushedHashes["hC"] {
+		t.Errorf("bulkItems = %+v, want hA and hC pushed only", bo.bulkItems)
+	}
+	if pushedHashes["hB"] {
+		t.Error("hB (null progress) must not appear in bulkItems at all")
+	}
+
+	// Status: only B and C pushed (A has no decisive reading_status).
+	statusCallBookIDs := map[int64]bool{}
+	for _, sc := range bo.statusCalls {
+		statusCallBookIDs[sc.bookID] = true
+	}
+	if len(bo.statusCalls) != 2 {
+		t.Errorf("statusCalls count = %d, want 2 (hB and hC; hA has no decisive status)", len(bo.statusCalls))
+	}
+	if !statusCallBookIDs[22] || !statusCallBookIDs[33] {
+		t.Errorf("statusCall bookIDs = %+v, want bookIDs 22 (hB) and 33 (hC)", statusCallBookIDs)
+	}
+	if statusCallBookIDs[11] {
+		t.Error("bookId 11 (hA) should not have a status call (hA.ReadingStatus is empty)")
+	}
 }

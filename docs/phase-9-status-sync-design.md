@@ -140,6 +140,22 @@ existing atomic `0600` JSON write).
     forward, no call;
   - push value differing from `LastPushedStatus` → `SetReadStatus` via
     `pushReadStatus`, and on success update all four status fields.
+
+  **Phase-10 note (supersedes the "unusable-progress" skip above, and the
+  "never triggers its own match-check" framing).** The 2026-08-02 operator
+  live report surfaced that this design's "unusable-progress" skip silently
+  dropped exactly the rows that matter for status sync — a book downloaded
+  then marked `finished` without ever being opened renders on the wire as
+  `progress: null, reading_status: "finished"`. Phase 10
+  (`docs/adr/phase-10-decision-record.md`, design at
+  `docs/phase-10-status-sync-decoupling-design.md`) decoupled the status
+  step from the progress classifier: the row-classification loop now routes
+  decisive-status rows into a unified match-check queue independent of
+  whether they carry a usable progress tuple, and `pushStatuses` no longer
+  re-imposes the progress gate. Every other Phase 9 decision (the mapper,
+  the Channel B shape, the 404 classification, the opt-in flag, the
+  warn-once discipline) is preserved unchanged; only the eligibility
+  predicate was wrong.
 - `classifyBookOrbitStatusErr` is the status-specific verdict classifier:
   `ErrUnauthorized` → fatal (aborts `RunOnce`); `ErrBookGone`/`ErrBadRequest`
   → skip; rate-limit/server/network → retry; context cancellation → fatal.
