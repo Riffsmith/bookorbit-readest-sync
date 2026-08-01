@@ -45,6 +45,9 @@ func Default() Config {
 			RetryMaxAttempts:    5,
 			RetryInitialBackoff: 500 * time.Millisecond,
 			RetryMaxBackoff:     30 * time.Second,
+			// SyncStatus defaults to false (opt-in): status writes edit what the
+			// BookOrbit catalog displays, unlike purely-informational progress.
+			SyncStatus: false,
 		},
 	}
 }

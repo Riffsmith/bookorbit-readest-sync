@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -22,11 +23,16 @@ const (
 	EnvBookOrbitUserkey    = "BRIDGE_BOOKORBIT_USERKEY"
 	EnvBookOrbitDeviceName = "BRIDGE_BOOKORBIT_DEVICE_NAME"
 	EnvBookOrbitDeviceID   = "BRIDGE_BOOKORBIT_DEVICE_ID"
+	// EnvBookOrbitAllowInsecureTransport opts into cleartext http:// for a
+	// non-loopback bookorbit.server_url. Default false; see AllowInsecureTransport
+	// doc-comment on BookOrbitConfig for the precise scope of this opt-in.
+	EnvBookOrbitAllowInsecureTransport = "BRIDGE_BOOKORBIT_ALLOW_INSECURE_TRANSPORT"
 
 	EnvPollInterval = "BRIDGE_POLL_INTERVAL"
 	EnvLogLevel     = "BRIDGE_LOG_LEVEL"
 	EnvLogFormat    = "BRIDGE_LOG_FORMAT"
 	EnvStateFile    = "BRIDGE_STATE_FILE"
+	EnvSyncStatus   = "BRIDGE_SYNC_STATUS"
 )
 
 // applyEnv overlays any set environment variables onto the config. Only
@@ -52,6 +58,7 @@ func (c *Config) applyEnv() {
 	setStr(&c.BookOrbit.Userkey, EnvBookOrbitUserkey)
 	setStr(&c.BookOrbit.DeviceName, EnvBookOrbitDeviceName)
 	setStr(&c.BookOrbit.DeviceID, EnvBookOrbitDeviceID)
+	setBool(&c.BookOrbit.AllowInsecureTransport, EnvBookOrbitAllowInsecureTransport)
 
 	setStr(&c.Bridge.LogLevel, EnvLogLevel)
 	setStr(&c.Bridge.LogFormat, EnvLogFormat)
@@ -61,6 +68,7 @@ func (c *Config) applyEnv() {
 			c.Bridge.PollInterval = d
 		}
 	}
+	setBool(&c.Bridge.SyncStatus, EnvSyncStatus)
 }
 
 // setStr assigns the value of the named environment variable to *dst when set
@@ -68,6 +76,18 @@ func (c *Config) applyEnv() {
 func setStr(dst *string, name string) {
 	if v, ok := lookupNonEmpty(name); ok {
 		*dst = v
+	}
+}
+
+// setBool parses the named environment variable as a bool and assigns it to
+// *dst when set and non-empty. An unparseable value is ignored, matching the
+// lenient handling the duration override uses (an invalid value never blocks
+// startup; validation of the merged config is Validate's job).
+func setBool(dst *bool, name string) {
+	if v, ok := lookupNonEmpty(name); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			*dst = b
+		}
 	}
 }
 

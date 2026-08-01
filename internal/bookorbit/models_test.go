@@ -2,6 +2,7 @@ package bookorbit
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -119,6 +120,37 @@ func TestBulkProgressResponseUnmatched(t *testing.T) {
 	}
 	if len(resp.Unmatched) != 2 || resp.Unmatched[0] != "h1" {
 		t.Errorf("Unmatched = %+v, want [h1 h2]", resp.Unmatched)
+	}
+}
+
+// TestSetReadStatusRequestWireBody pins the Channel B wire contract: the body
+// is exactly {"status": "..."} with no device-wrapper keys (the server DTO is
+// single-field and forbidNonWhitelisted rejects extras with a 400). See
+// docs/phase-9-status-sync-design.md §3.2.
+func TestSetReadStatusRequestWireBody(t *testing.T) {
+	req := SetReadStatusRequest{Status: "read"}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"status":"read"}` {
+		t.Errorf("SetReadStatusRequest body = %s, want exactly {\"status\":\"read\"}", raw)
+	}
+	for _, notWant := range []string{"deviceId", "deviceModel", "pluginVersion", "deviceTime"} {
+		if strings.Contains(string(raw), notWant) {
+			t.Errorf("body = %s, must not carry device-wrapper key %q", raw, notWant)
+		}
+	}
+}
+
+// TestSetReadStatusResponseDecodes pins that {"readStatus": "<token>"} decodes.
+func TestSetReadStatusResponseDecodes(t *testing.T) {
+	var resp SetReadStatusResponse
+	if err := json.Unmarshal([]byte(`{"readStatus":"read"}`), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ReadStatus != "read" {
+		t.Errorf("ReadStatus = %q, want read", resp.ReadStatus)
 	}
 }
 

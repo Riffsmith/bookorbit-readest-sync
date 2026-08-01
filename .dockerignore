@@ -1,0 +1,30 @@
+# Keep the build context small and secret-free.
+# Only go.mod, cmd/, and internal/ are COPYed in, but belt-and-braces:
+
+# VCS / CI
+.git/
+.github/
+
+# Local secrets and state — must never enter an image
+configs/bridge.yaml
+configs/*.local.yaml
+bridge-state.json
+*.state.json
+
+# Build artifacts
+bin/
+dist/
+
+# Documentation and reference material (not needed to build)
+docs/
+reference/
+systemd/
+*.md
+
+# Editor/OS noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

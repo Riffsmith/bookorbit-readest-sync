@@ -25,6 +25,23 @@ type MatchRecord struct {
 	BookID        int64   `json:"bookId"`
 	LastPushedAt  int64   `json:"lastPushedAt"`  // Unix epoch seconds of last successful push
 	LastPushedPct float64 `json:"lastPushedPct"` // 0..1 percentage last pushed
+
+	// LastSeenStatus/LastSeenStatusAt record the most recent *Readest*
+	// reading_status value observed ("unread"/"finished"/"abandoned", or ""
+	// for a non-decisive/absent one) and when it was seen. This is distinct
+	// from LastPushedStatus: an `unread → finished` transition must diff
+	// against what was *seen*, not against what was *pushed* (a decisive-no-op
+	// `unread` pushes nothing but must still be recorded so the later
+	// transition is detected as a change). See the phase-9 design, Decision A.
+	LastSeenStatus   string `json:"lastSeenStatus"`
+	LastSeenStatusAt int64  `json:"lastSeenStatusAt"` // Unix epoch seconds
+	// LastPushedStatus/LastPushedStatusAt record the last BookOrbit token
+	// written ("read"/"abandoned", or "" when never pushed / decisive-no-op)
+	// and when it was written. The engine's unchanged-skip compares the mapped
+	// token against LastPushedStatus; a status-push failure leaves it
+	// unadvanced so the next poll retries (decoupled from progress, Decision E).
+	LastPushedStatus   string `json:"lastPushedStatus"`
+	LastPushedStatusAt int64  `json:"lastPushedStatusAt"` // Unix epoch seconds
 }
 
 // Data is the full contents of the store. Tokens are kept alongside sync state

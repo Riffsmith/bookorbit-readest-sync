@@ -48,6 +48,27 @@ func exerciseStore(t *testing.T, s Store) {
 	if err != nil || got != rec {
 		t.Errorf("Match = %+v, %v; want %+v", got, err, rec)
 	}
+
+	// Status-sync fields (Phase 9): the two seen/pushed pairs round-trip
+	// alongside the progress fields. Setting a decisive `unread` records
+	// LastSeenStatus without touching LastPushedStatus (decisive-but-no-op),
+	// and a later `finished → read` push records both pairs.
+	rec2 := MatchRecord{
+		BookFileID:         7,
+		BookID:             9,
+		LastPushedAt:       50,
+		LastPushedPct:      1.0,
+		LastSeenStatus:     "finished",
+		LastSeenStatusAt:   300,
+		LastPushedStatus:   "read",
+		LastPushedStatusAt: 310,
+	}
+	s.SetMatch("hash2", rec2)
+	got2, err := s.Match("hash2")
+	if err != nil || got2 != rec2 {
+		t.Errorf("Match (status fields) = %+v, %v; want %+v", got2, err, rec2)
+	}
+
 	s.DeleteMatch("hash1")
 	if _, err := s.Match("hash1"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("after DeleteMatch err = %v, want ErrNotFound", err)
@@ -93,6 +114,13 @@ func TestFileStoreRoundTrip(t *testing.T) {
 	}
 	if got := s2.DeviceID(nil); got != "gen-uuid" {
 		t.Errorf("persisted device id = %q, want gen-uuid", got)
+	}
+	// The Phase 9 seen/pushed status pairs survive a reload from disk.
+	if rec, err := s2.Match("hash2"); err != nil {
+		t.Fatalf("reload Match hash2: %v", err)
+	} else if rec.LastSeenStatus != "finished" || rec.LastSeenStatusAt != 300 ||
+		rec.LastPushedStatus != "read" || rec.LastPushedStatusAt != 310 {
+		t.Errorf("persisted status fields = %+v, want finished/300 read/310", rec)
 	}
 }
 

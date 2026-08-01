@@ -49,6 +49,17 @@ type BookOrbitConfig struct {
 	// DeviceID is the stable identifier for this bridge instance. If empty,
 	// one is generated on first run and persisted in the state file.
 	DeviceID string `yaml:"device_id"`
+
+	// AllowInsecureTransport, when true, accepts an `http://` BookOrbit
+	// server_url whose host is not a loopback/link-local address. The
+	// x-auth-key header is the unsalted MD5 of the password — a
+	// password-equivalent credential — so cleartext transport to a
+	// non-private host broadcasts it; false (the default) makes that fatal
+	// at config load. Setting it true suppresses the fatal error and emits
+	// a single startup WARN documenting the decision. It relaxes ONLY the
+	// cleartext-non-loopback check: unparseable URLs, bad schemes,
+	// userinfo, and fragments are still fatal regardless of this flag.
+	AllowInsecureTransport bool `yaml:"allow_insecure_transport"`
 }
 
 // BridgeConfig holds daemon behavior and tuning knobs.
@@ -73,6 +84,13 @@ type BridgeConfig struct {
 	// UnmatchedCooldown is how long an unmatched hash is skipped before a
 	// fresh match-check is attempted.
 	UnmatchedCooldown time.Duration `yaml:"unmatched_cooldown"`
+
+	// SyncStatus gates the optional Readest → BookOrbit reading-status push
+	// (Phase 9). Off by default: unlike progress (purely informational), a
+	// status write changes what the operator's BookOrbit catalog displays as
+	// the book's state, so it is opt-in. See docs/phase-9-status-sync-design.md
+	// Decision F.
+	SyncStatus bool `yaml:"sync_status"`
 
 	// HTTPTimeout is the per-request timeout for API calls.
 	HTTPTimeout time.Duration `yaml:"http_timeout"`

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Riffsmith/bookorbit-readest-sync/internal/util/httpclient"
@@ -42,6 +43,17 @@ var (
 	// ErrBadRequest so Phase 6 can key a bulk-endpoint-unsupported fallback
 	// decision off it without conflating it with a generic client bug.
 	ErrUnsupportedEndpoint = errors.New("bookorbit: endpoint not supported")
+	// ErrBookGone is a 404 response on the Channel B read-status endpoint
+	// (SetReadStatus) only. There 404 means the cached bookId is stale — the
+	// book was deleted from the user's library or filtered out by content
+	// filters (docs/reverse-engineering-report.md §9.5) — not that the route
+	// is missing (Channel B is a first-class route; no legacy-server variant
+	// exists). It is deliberately NOT returned by the shared classifier
+	// (classifyErrorResponse), which keeps mapping 404 → ErrUnsupportedEndpoint
+	// for the other endpoints; SetReadStatus intercepts 404 first, then
+	// delegates everything else to the shared classifier unchanged. See
+	// docs/phase-9-status-sync-design.md Decision H (Mech-α).
+	ErrBookGone = errors.New("bookorbit: book not found or access revoked")
 	// ErrRateLimited is a 429 response. Not documented for BookOrbit's
 	// self-hosted servers, but handled defensively; retryable by the engine.
 	ErrRateLimited = errors.New("bookorbit: rate limited")
@@ -76,6 +88,12 @@ type API interface {
 	// that do not support the bulk endpoint; deciding when to use it instead
 	// of BulkProgress is the sync engine's job (Phase 6), not this client's.
 	UpdateProgress(ctx context.Context, req UpdateProgressRequest) error
+	// SetReadStatus writes a single book's read status via the Channel B
+	// per-book endpoint (Phase 9). It is additive like UpdateProgress was in
+	// Phase 5: no other method signature changes. The engine decides whether
+	// to call it (gated by config.Bridge.SyncStatus) and what token to send;
+	// this method only makes the endpoint callable faithfully.
+	SetReadStatus(ctx context.Context, bookID int64, status string) error
 }
 
 // Client is the concrete BookOrbit API client. It turns domain-level sync
@@ -286,6 +304,72 @@ func (c *Client) UpdateProgress(ctx context.Context, req UpdateProgressRequest) 
 		return c.classifyErrorResponse(resp, http.MethodPut, "/koreader/syncs/progress")
 	}
 	return nil
+}
+
+// SetReadStatus writes a single book's read status via PUT
+// /koreader/plugin/catalog/books/{bookID}/read-status (Channel B). The device
+// identity is NOT attached: the server DTO declares only a `status` field and
+// rejects extra keys with a 400, so the body is exactly {"status": "..."}.
+//
+// A 404 on this endpoint is intercepted before the shared classifier and
+// reported as ErrBookGone rather than ErrUnsupportedEndpoint: here it means
+// the cached bookId is stale (book deleted or access filtered), not that the
+// route is missing. Every other non-2xx status delegates unchanged. See
+// docs/phase-9-status-sync-design.md §3.2 (Decision B / Decision H).
+func (c *Client) SetReadStatus(ctx context.Context, bookID int64, status string) error {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	body, err := c.encodeAndCheckSize(SetReadStatusRequest{Status: status})
+	if err != nil {
+		return err
+	}
+
+	path := "/koreader/plugin/catalog/books/" + strconv.FormatInt(bookID, 10) + "/read-status"
+	httpReq, err := c.newRequest(ctx, http.MethodPut, path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return c.classifyBookGone(resp, path)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return c.classifyErrorResponse(resp, http.MethodPut, path)
+	}
+
+	// The success body echoes the requested token ({"readStatus": "..."}). We
+	// read and decode it to guard the body-size bound and surface a malformed
+	// body, but the echoed value carries no information the caller does not
+	// already know, so success is reported as a bare nil.
+	raw, err := readBoundedBody(resp.Body)
+	if err != nil {
+		return err
+	}
+	var out SetReadStatusResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("%w: decode set-read-status: %v", ErrMalformedResponse, err)
+	}
+	return nil
+}
+
+// classifyBookGone reads a bounded error body and reports the 404 that
+// SetReadStatus intercepted as ErrBookGone, attaching the status code and a
+// truncated body for diagnostics — the same wrapping shape every other
+// classified error in this package uses. It exists apart from
+// classifyErrorResponse because on Channel B a 404 must NOT be conflated with
+// "route missing" (ErrUnsupportedEndpoint); Channel B is a first-class route
+// and carries no legacy-server fallback.
+func (c *Client) classifyBookGone(resp *http.Response, path string) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	return fmt.Errorf("%w: %s %s: status %d: %s",
+		ErrBookGone, http.MethodPut, path, resp.StatusCode, bytes.TrimSpace(body))
 }
 
 // stampMatchCheck returns a copy of req with the device wrapper fields

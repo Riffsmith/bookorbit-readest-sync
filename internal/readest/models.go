@@ -25,6 +25,19 @@ type BookRow struct {
 	DeletedAt string          `json:"deleted_at"`
 	SyncedAt  string          `json:"synced_at"`
 	CreatedAt string          `json:"created_at"`
+	// ReadingStatus is the Readest cloud row's reading status token
+	// ("unread" | "reading" | "finished" | "abandoned", or "" when unset).
+	// It already arrives on the bulk-pull response the engine consumes, so
+	// no new endpoint is required; it is stored raw, exactly like the other
+	// scalar fields.
+	ReadingStatus string `json:"reading_status"`
+	// ReadingStatusUpdatedAt is the ISO-8601 timestamp at which the reading
+	// status last changed, stored raw (not pre-converted to ms) to match the
+	// convention of UpdatedAt/DeletedAt/SyncedAt/CreatedAt. It is converted
+	// on demand via util.ISOToMs when a caller needs it; the v1 status-sync
+	// engine does not use it in watermark math (status pushes are decoupled
+	// from the progress watermark per the Phase 9 design).
+	ReadingStatusUpdatedAt string `json:"reading_status_updated_at"`
 }
 
 // BooksResponse is the envelope of `GET /sync?type=books`. The server returns

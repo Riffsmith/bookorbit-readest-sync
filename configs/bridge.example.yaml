@@ -16,10 +16,12 @@
 #   BRIDGE_BOOKORBIT_USERKEY        bookorbit.userkey
 #   BRIDGE_BOOKORBIT_DEVICE_NAME    bookorbit.device_name
 #   BRIDGE_BOOKORBIT_DEVICE_ID      bookorbit.device_id
+#   BRIDGE_BOOKORBIT_ALLOW_INSECURE_TRANSPORT  bookorbit.allow_insecure_transport
 #   BRIDGE_POLL_INTERVAL            bridge.poll_interval
 #   BRIDGE_LOG_LEVEL                bridge.log_level
 #   BRIDGE_LOG_FORMAT               bridge.log_format
 #   BRIDGE_STATE_FILE               bridge.state_file
+#   BRIDGE_SYNC_STATUS              bridge.sync_status
 
 readest:
   # Your Readest account credentials (required). Prefer env vars for these.
@@ -35,7 +37,9 @@ readest:
 
 bookorbit:
   # Base URL of your self-hosted BookOrbit server (required). The "/api/v1"
-  # prefix is added automatically if missing.
+  # prefix is added automatically if missing. Use `https://` whenever possible;
+  # the x-auth-key header is the MD5 of your password (a password-equivalent
+  # credential). See `allow_insecure_transport` below for the cleartext case.
   server_url: ""
 
   # Account name sent as the x-auth-user header (required).
@@ -45,6 +49,12 @@ bookorbit:
   # pre-hashed userkey. Prefer env vars. If both are set, userkey wins.
   password: ""
   # userkey: ""  # 32-char lowercase hex MD5 of the password
+
+  # Allow cleartext http:// to a non-loopback bookorbit.server_url. The
+  # x-auth-key header is the MD5 of your password (a password-equivalent
+  # credential); https:// is strongly preferred. Set true only if your
+  # BookOrbit server has no TLS and you accept the cleartext risk.
+  # allow_insecure_transport: false
 
   # Device identity shown in BookOrbit. device_id is generated and persisted on
   # first run if left empty; set it only to pin a specific identity.
@@ -67,6 +77,11 @@ bridge:
   # match_batch_size: 500        # hashes per match-check request
   # progress_batch_size: 100     # items per bulk-progress request
   # max_body_bytes: 921600       # 900 KiB request body cap
+
+  # Push Readest reading-status changes — finished/abandoned — to BookOrbit.
+  # Off by default because, unlike progress, this edits what your BookOrbit
+  # catalog displays. Accepts true/false (or 1/0, yes/no, on/off).
+  # sync_status: false
 
   # How long an unmatched hash is skipped before re-checking.
   # unmatched_cooldown: "24h"

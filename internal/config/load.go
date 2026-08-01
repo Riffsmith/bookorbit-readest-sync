@@ -102,6 +102,12 @@ func (c *Config) applyValues(v map[string]string) error {
 			c.BookOrbit.DeviceName = val
 		case "bookorbit.device_id":
 			c.BookOrbit.DeviceID = val
+		case "bookorbit.allow_insecure_transport":
+			b, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("bookorbit.allow_insecure_transport: %w", err)
+			}
+			c.BookOrbit.AllowInsecureTransport = b
 
 		// Bridge.
 		case "bridge.poll_interval":
@@ -140,6 +146,12 @@ func (c *Config) applyValues(v map[string]string) error {
 				return fmt.Errorf("bridge.unmatched_cooldown: %w", err)
 			}
 			c.Bridge.UnmatchedCooldown = d
+		case "bridge.sync_status":
+			b, err := strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("bridge.sync_status: %w", err)
+			}
+			c.Bridge.SyncStatus = b
 		case "bridge.http_timeout":
 			d, err := time_ParseDuration(val)
 			if err != nil {

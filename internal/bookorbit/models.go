@@ -134,6 +134,29 @@ type BulkProgressResponse struct {
 	Unmatched []string `json:"unmatched"`
 }
 
+// SetReadStatusRequest is the body of PUT
+// /koreader/plugin/catalog/books/{bookId}/read-status, BookOrbit's Channel B
+// per-book read-status endpoint. It deliberately carries NO device wrapper:
+// the server's KoreaderCatalogSetReadStatusDto declares only a `status` field,
+// and the global ValidationPipe runs with forbidNonWhitelisted: true, so any
+// extra field (deviceId, deviceModel, pluginVersion, deviceTime) is rejected
+// with a 400 before the service method runs. See docs/reverse-engineering-report.md
+// §9.3 and docs/status-sync-design-investigation.md §6.3 (Decision B).
+type SetReadStatusRequest struct {
+	Status string `json:"status"`
+}
+
+// SetReadStatusResponse is the server's reply to a successful Channel B
+// read-status write: it echoes the requested token in the HTTP response body.
+// The persisted DB status may differ from the echoed token for one case — the
+// server's projection maps `reading` on a previously-completed book to
+// `rereading` (reading-attempt.service.ts:114) — but that case never reaches
+// the bridge: Readest's `reading` is non-decisive and is always skipped. See
+// docs/reverse-engineering-report.md §9.4.
+type SetReadStatusResponse struct {
+	ReadStatus string `json:"readStatus"`
+}
+
 // UpdateProgressRequest is the body of PUT /koreader/syncs/progress, the
 // kosync-compatible single-book fallback endpoint used when the bulk endpoint
 // is unsupported by the target server. Its field naming deliberately does NOT

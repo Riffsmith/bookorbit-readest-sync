@@ -13,6 +13,10 @@
 # Secrets (BRIDGE_READEST_PASSWORD, BRIDGE_BOOKORBIT_PASSWORD, ...) are best
 # supplied via /etc/bridge/bridge.env (see EnvironmentFile= below) rather
 # than written into bridge.yaml on disk.
+#
+# Prefer https:// for bookorbit.server_url; the x-auth-key header is the MD5 of
+# the password (a password-equivalent). Use bookorbit.allow_insecure_transport
+# only if your BookOrbit server has no TLS and you accept the cleartext risk.
 
 [Unit]
 Description=Readest to BookOrbit sync bridge

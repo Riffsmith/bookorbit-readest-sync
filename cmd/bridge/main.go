@@ -27,6 +27,7 @@ import (
 	"github.com/Riffsmith/bookorbit-readest-sync/internal/readest"
 	"github.com/Riffsmith/bookorbit-readest-sync/internal/sync"
 	"github.com/Riffsmith/bookorbit-readest-sync/internal/sync/state"
+	"github.com/Riffsmith/bookorbit-readest-sync/internal/util"
 	"github.com/Riffsmith/bookorbit-readest-sync/internal/util/httpclient"
 )
 
@@ -81,6 +82,21 @@ func run(argv []string, stdout, stderr io.Writer) error {
 	}
 
 	log := logger.New(stderr, cfg.Bridge.LogLevel, cfg.Bridge.LogFormat)
+
+	// Security-hardening transport warning. Fires once at startup, only when
+	// the operator has explicitly set bookorbit.allow_insecure_transport=true,
+	// because the only way the boolean can matter (cleartext http to a
+	// non-loopback host) is a configuration Validate has already accepted
+	// by virtue of the opt-in. The x-auth-key header is the unsalted MD5 of
+	// the password (a password-equivalent credential); naming the host here
+	// documents the operator's affirmative decision in the daemon log so the
+	// cleartext transmission is not silent. See
+	// docs/security-hardening-bookorbit-url-validation-design.md §3 Decision I.
+	if cfg.BookOrbit.AllowInsecureTransport {
+		log.Warn("bridge: bookorbit.server_url uses cleartext http to a non-loopback host; x-auth-key (MD5 of password) will travel in cleartext",
+			"url", cfg.BookOrbit.ServerURL,
+			"host", util.HostOf(cfg.BookOrbit.ServerURL))
+	}
 
 	// Open the persistent state store. Loading a missing file is fine.
 	st := state.NewFileStore(cfg.Bridge.StateFile)

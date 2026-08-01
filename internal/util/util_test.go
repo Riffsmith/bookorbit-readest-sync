@@ -180,3 +180,122 @@ func TestBatchFunc(t *testing.T) {
 		t.Errorf("BatchFunc early stop visited %d chunks, want 1", chunks)
 	}
 }
+
+func TestSchemeOf(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "http", in: "http://x", want: "http"},
+		{name: "https upper preserved lowercase", in: "HTTPS://x", want: "https"},
+		{name: "gopher", in: "gopher://x", want: "gopher"},
+		{name: "empty input", in: "", wantErr: true},
+		{name: "no scheme", in: "//noscheme", wantErr: true},
+		{name: "bare words parse with no scheme", in: "not a url at all", wantErr: true},
+		{name: "host only path", in: "example.com", wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := SchemeOf(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("SchemeOf(%q) expected error, got %q", c.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SchemeOf(%q) unexpected error: %v", c.in, err)
+			}
+			if c.wantErr {
+				return
+			}
+			if got != c.want {
+				t.Errorf("SchemeOf(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestIsLoopbackOrLinkLocal(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "localhost", in: "localhost", want: true},
+		{name: "localhost trailing dot", in: "localhost.", want: true},
+		{name: "ipv4 loopback", in: "127.0.0.1", want: true},
+		{name: "ipv4 loopback upper bound", in: "127.255.255.255", want: true},
+		{name: "ipv4 link-local low", in: "169.254.0.0", want: true},
+		{name: "ipv4 link-local mid", in: "169.254.10.20", want: true},
+		{name: "ipv6 loopback bare", in: "::1", want: true},
+		{name: "ipv6 loopback bracketed", in: "[::1]", want: true},
+		{name: "ipv6 loopback with port", in: "[::1]:8080", want: true},
+		{name: "ipv6 link-local", in: "fe80::1", want: true},
+		{name: "ipv6 link-local bracketed", in: "[fe80::1]", want: true},
+		{name: "ipv4 loopback with port", in: "127.0.0.1:3000", want: true},
+
+		{name: "ipv4 lan", in: "192.168.1.10", want: false},
+		{name: "ipv4 lan with port", in: "192.168.1.10:3000", want: false},
+		{name: "ipv4 private 10", in: "10.0.0.1", want: false},
+		{name: "ipv4 public", in: "8.8.8.8", want: false},
+		{name: "dns name", in: "example.com", want: false},
+		{name: "private-looking dns", in: "nas.local", want: false},
+		{name: "empty", in: "", want: false},
+		{name: "junk", in: "not an ip or host", want: false},
+		{name: "bracketed ipv4", in: "[127.0.0.1]", want: true},
+		{name: "bracketed ipv4 with port", in: "[127.0.0.1]:3000", want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsLoopbackOrLinkLocal(c.in); got != c.want {
+				t.Errorf("IsLoopbackOrLinkLocal(%q) = %v, want %v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestHostOf(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"https://books.example.com/api/v1", "books.example.com"},
+		{"http://192.168.1.10:3000", "192.168.1.10:3000"},
+		{"https://[::1]:8443/api/v1", "[::1]:8443"},
+		{"http://localhost:8080/api/v1", "localhost:8080"},
+	}
+	for _, c := range cases {
+		if got := HostOf(c.in); got != c.want {
+			t.Errorf("HostOf(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// On an unparseable input HostOf returns the input verbatim so a caller
+	// logging a cleartext warning still names something.
+	if got := HostOf("not a url at all"); got != "not a url at all" {
+		t.Errorf("HostOf(unparseable) = %q, want the input string back", got)
+	}
+}
+
+func TestNormalizeBookOrbitURLRejectsInvalid(t *testing.T) {
+	cases := []string{
+		"http://user:pass@nas/api/v1", // userinfo baked into URL is a footgun the BookOrbit protocol does not use
+		"http://nas/api/v1#frag",      // a fragment on an API base URL is meaningless (paste error)
+		"not a url",                   // unparseable / no scheme
+		"",                            // empty input is the existing "missing URL" sentinel
+		"//noscheme",                  // scheme is required
+	}
+	for _, c := range cases {
+		if got := NormalizeBookOrbitURL(c); got != "" {
+			t.Errorf("NormalizeBookOrbitURL(%q) = %q, want empty (rejected)", c, got)
+		}
+	}
+	// Note: a bad scheme (e.g. gopher://) parses cleanly and is normalized
+	// normally here — the scheme allowlist is enforced in config.Validate via
+	// util.SchemeOf, which is the cleaner place to surface "must use http or
+	// https" messages. Pinning that policy here would duplicate the check and
+	// risk the two code paths disagreeing on what a valid URL is; the
+	// design (security-hardening-bookorbit-url-validation-design.md §4.6,
+	// §5.5) deliberately keeps the normalizer a pure normalizer.
+}

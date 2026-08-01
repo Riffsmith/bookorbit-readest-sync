@@ -1,0 +1,52 @@
+services:
+  bridge:
+    # Image tags:
+    #   :stable -> tip of main, updates on each merge to main
+    #   :latest -> last release tag (v1.2.3); recommended for most users
+    #   :dev    -> tip of dev branch (bleeding edge)
+    image: ghcr.io/riffsmith/bookorbit-readest-sync:stable
+    # To build locally instead of pulling:
+    # build: .
+    container_name: bookorbit-readest-sync
+    restart: unless-stopped
+    environment:
+      # --- Required ---
+      BRIDGE_READEST_EMAIL: "you@example.com"
+      BRIDGE_READEST_PASSWORD: "changeme"
+      # Use https:// if your BookOrbit server supports TLS; the x-auth-key
+      # header is a password-equivalent (unsalted MD5 of the password). For
+      # cleartext http:// to a LAN host, also set
+      # BRIDGE_BOOKORBIT_ALLOW_INSECURE_TRANSPORT: "true" below.
+      # The auth key from BookOrbit -> Settings -> KOReader.
+      BRIDGE_BOOKORBIT_SERVER_URL: "https://192.168.1.10:3000"
+      BRIDGE_BOOKORBIT_USERNAME: "your-koreader-username"
+      BRIDGE_BOOKORBIT_PASSWORD: "" 
+      # BRIDGE_BOOKORBIT_USERKEY: ""
+
+      # --- Optional ---
+      # Set to "true" only if your BookOrbit server has no TLS and you accept
+      # that the x-auth-key header (a password-equivalent) travels in cleartext.
+      # The bridge logs a WARN at startup naming the host.
+      # BRIDGE_BOOKORBIT_ALLOW_INSECURE_TRANSPORT: "true"
+      BRIDGE_POLL_INTERVAL: "15m"
+      BRIDGE_LOG_LEVEL: "info"
+      BRIDGE_LOG_FORMAT: "json"
+      # device identity shown in BookOrbit; id is auto-generated if unset
+      # BRIDGE_BOOKORBIT_DEVICE_NAME: "readest-bridge"
+      # BRIDGE_BOOKORBIT_DEVICE_ID: ""
+      # push finished/abandoned reading status to BookOrbit (default false)
+      # BRIDGE_SYNC_STATUS: "false"
+      # only needed for self-hosted Readest sync (leave unset otherwise)
+      # BRIDGE_SUPABASE_URL: "https://readest.supabase.co"
+      # BRIDGE_SUPABASE_ANON_KEY: ""
+      # BRIDGE_READEST_SYNC_BASE_URL: "https://web.readest.com/api"
+
+      BRIDGE_STATE_FILE: "/data/bridge-state.json"
+    volumes:
+      # Persist tokens, match cache, and the device id across restarts.
+      - bridge-state:/data
+    # One-shot mode for testing: overrides daemon mode, syncs once, exits.
+    # command: ["--once"]
+
+volumes:
+  bridge-state:
