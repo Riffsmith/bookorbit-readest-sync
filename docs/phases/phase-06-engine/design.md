@@ -1,5 +1,17 @@
 # Design: `internal/sync/engine` — Sync Orchestration (Phase 6)
 
+> **⚠️ Two ADR addenda supersede parts of this document.** The design as approved
+> is preserved unchanged below, but two live-server invalidations rewrote
+> §6.2 (the `MatchCandidate.Source` value) and §6.3 second bullet (the
+> "hash absent from both lists" handling). Before relying on this doc's
+> §6.2 or §6.3 for current contract, see the hub README's
+> "[What shipped DIFFERENTLY](./README.md#what-shipped-differently-from-the-design)"
+> section, and read
+> [Addendum 1](./decision-record.md#addendum--live-server-invalidation-of-decision-e-matchcandidatesource)
+> and
+> [Addendum 2](./decision-record.md#addendum-2--live-server-invalidation-of-63-hash-absent-from-match-check-response-handling)
+> in the ADR.
+
 **Status:** implemented and accepted. This document is the authoritative design record for the shipped engine — it describes the code as built in internal/sync/engine.go and internal/sync/engine_test.go, not a proposal.
 **Scope:** the sync engine only — `Engine.RunOnce` / `Engine.Run`, the batching/retry/watermark/cache orchestration that ties `internal/readest`, `internal/bookorbit`, and `internal/sync/state` together. `internal/readest`, `internal/bookorbit`, and `internal/sync/state` are **complete and accepted** (Phases 3–5); this document does not redesign them and proposes no changes to their public APIs unless explicitly called out as a required companion change (see §14).
 

@@ -10,7 +10,7 @@ Readest -> Readest Sync -> This Bridge -> BookOrbit
 
 ## What it does
 
-Polls the Readest sync API on an interval, matches books to your BookOrbit library by file hash, and pushes progress percentages. Optionally pushes `finished`/`abandoned` reading status (see `docs/phase-9-status-sync-design.md` and the Phase 10 decoupling in `docs/adr/phase-10-decision-record.md`). Status sync is fully decoupled from progress: a book downloaded and then marked finished/abandoned without ever being opened in Readest is matched and status-pushed on the first `BRIDGE_SYNC_STATUS=true` poll that sees it. One-way only. Syncing highlights and notes is in the roadmap. I'll probably implement it when I know for sure the primary features i.e. progress and status sync works without a hitch.
+Polls the Readest sync API on an interval, matches books to your BookOrbit library by file hash, and pushes progress percentages. Optionally pushes `finished`/`abandoned` reading status (see [`docs/phases/phase-09-status-sync/design.md`](./docs/phases/phase-09-status-sync/design.md) and the Phase 10 decoupling in [`docs/phases/phase-10-status-sync-decoupling/decision-record.md`](./docs/phases/phase-10-status-sync-decoupling/decision-record.md)). Status sync is fully decoupled from progress: a book downloaded and then marked finished/abandoned without ever being opened in Readest is matched and status-pushed on the first `BRIDGE_SYNC_STATUS=true` poll that sees it. One-way only. Syncing highlights and notes is in the roadmap. I'll probably implement it when I know for sure the primary features i.e. progress and status sync works without a hitch.
 
 Caveat: only validated against a small personal library. If yours exceeds ~300 books, watch for slow first-pull behavior or untested edge cases.
 
@@ -85,8 +85,10 @@ make fmt       # gofmt -s
 make release   # static linux/amd64 + linux/arm64 binaries into bin/
 ```
 
-For protocols and internals, see `docs/reverse-engineering-report.md` and
-`docs/reference-map.md`.
+For protocols and internals, see the docs index at
+[`docs/README.md`](./docs/README.md) — especially
+[`docs/reverse-engineering-report.md`](./docs/reverse-engineering-report.md) and
+[`docs/context/reference-map.md`](./docs/context/reference-map.md).
 
 ## License
 

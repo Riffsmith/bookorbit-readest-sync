@@ -1,6 +1,6 @@
 # Feasibility: Syncing Annotations/Highlights + Progress + Status
 
-**Scope:** One-way Readest → BookOrbit, Readest as source of truth, annotations/highlights included alongside progress and status. This document extends the shipped progress-only bridge (Phases 0–8, PR `docs/phase-9-status-sync-design.md` for status) to cover **annotation sync**.
+**Scope:** One-way Readest → BookOrbit, Readest as source of truth, annotations/highlights included alongside progress and status. This document extends the shipped progress-only bridge (Phases 0–8, see phases/phase-09-status-sync/ for status) to cover **annotation sync**.
 
 **Date:** 2026-08-01
 
@@ -559,4 +559,4 @@ Each phase builds on the last: progress → status → annotations. All one-way,
 
 ---
 
-*Prepared from: `reference/readest.koplugin/readest_syncannotations.lua`, `reference/readest.koplugin/spec/syncannotations_spec.lua`, `reference/readest.koplugin/readest-sync-api.json`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_annotations.lua`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_api.lua`, `reference/bookorbit/server/src/modules/koreader/koreader-annotation-exchange.service.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-exchange.dto.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-plugin.dto.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-sync.service.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-style-map.ts`, `reference/bookorbit/server/src/modules/position-converter/position-converter.service.ts`, and the project's existing `docs/phase-9-status-sync-design.md`.*
+*Prepared from: `reference/readest.koplugin/readest_syncannotations.lua`, `reference/readest.koplugin/spec/syncannotations_spec.lua`, `reference/readest.koplugin/readest-sync-api.json`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_annotations.lua`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_api.lua`, `reference/bookorbit/server/src/modules/koreader/koreader-annotation-exchange.service.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-exchange.dto.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-plugin.dto.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-sync.service.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-style-map.ts`, `reference/bookorbit/server/src/modules/position-converter/position-converter.service.ts`, and the project's existing [status-sync design documentation](docs/phases/phase-09-status-sync/design.md).*

@@ -1,10 +1,18 @@
 # Phase 9 — Status Sync: Authoritative Design Record
 
+> **Superseded in one respect by [Phase 10](../phase-10-status-sync-decoupling/README.md).**
+> This document's §4 row-classification gate — the "rows carrying `progress: null` fall out of
+> the match-check queue before the status step ever sees them" assumption — was found defective
+> against a live server on 2026-08-02. The row-classification loop was refactored in Phase 10 so a
+> row with a decisive `reading_status` is status-eligible on its own merits. Everything else in
+> this design (the mapping table, Channel B body shape, 404 classification, opt-in flag,
+> warn-once discipline, status-failure decoupling from progress watermark) remains authoritative.
+
 **Status:** implemented and verified. This document is the authoritative,
 as-built record of the Phase 9 one-way Readest → BookOrbit reading-status
 sync. It describes the design the shipped client implements; the
 file-by-file account of how it was built and verified lives in
-`docs/adr/phase-9-decision-record.md`.
+[./decision-record.md](./decision-record.md).
 
 **Scope:** one-way Readest → BookOrbit reading-status sync
 (`finished`/`abandoned` push; `unread`/`reading` no-op), extending the
