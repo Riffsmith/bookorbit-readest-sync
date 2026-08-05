@@ -1,6 +1,6 @@
 # BookOrbit Readest Sync Bridge
 
-A standalone Go service that syncs reading progress from Readest into BookOrbit. Inspired by the KOReader plugins for both services.
+A standalone Go service that syncs reading progress from [Readest](https://github.com/readest/readest) into [BookOrbit](https://github.com/bookorbit/bookorbit). Built by referencing the KOReader plugins from both projects.
 
 ```
 Readest -> Readest Sync -> This Bridge -> BookOrbit
@@ -85,6 +85,15 @@ make fmt       # gofmt -s
 make release   # static linux/amd64 + linux/arm64 binaries into bin/
 ```
 
+## Reference
+
+This product is built by referencing the KOReader plugins offered by the two upstream projects:
+
+- [Readest](https://github.com/readest/readest) - its KOReader plugin syncs reading progress to the Readest sync API, which is this bridge's source of truth.
+- [BookOrbit](https://github.com/bookorbit/bookorbit) - its KOReader plugin syncs reading progress to a self-hosted BookOrbit server, which is this bridge's write target.
+
+The plugins are treated as executable specifications and never copied verbatim. For the exact file-by-file mapping and what is deliberately left out, see [`docs/context/reference-map.md`](./docs/context/reference-map.md).
+
 For protocols and internals, see the docs index at
 [`docs/README.md`](./docs/README.md) — especially
 [`docs/reverse-engineering-report.md`](./docs/reverse-engineering-report.md) and
@@ -92,4 +101,4 @@ For protocols and internals, see the docs index at
 
 ## License
 
-AGPL 3: [[LICENSE](./LICENSE)
+AGPL 3: [LICENSE](./LICENSE)
