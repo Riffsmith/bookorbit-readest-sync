@@ -1,3 +1,5 @@
+Has been archived since Readest supports this feature natively now.
+
 # BookOrbit Readest Sync Bridge
 
 A standalone Go service that syncs reading progress from [Readest](https://github.com/readest/readest) into [BookOrbit](https://github.com/bookorbit/bookorbit). Built by referencing the KOReader plugins from both projects.
