@@ -17,11 +17,11 @@
 
 **Recommendation:** Ship Phase 9 (status sync) first — it's almost free compared to annotations (three additive touch-points, zero position resolution) and delivers the most user-visible value. Annotations should be **Phase 10**, a separate design investigation with its own implementation plan.
 
-| Feature | Effort | Value | Risk |
-|---------|--------|-------|------|
-| Progress sync (shipped) | Done | High | Low |
-| Status sync (Phase 9) | Small | High | Low |
-| Annotation sync (Phase 10) | **Large** | High | **Medium-high** |
+| Feature                    | Effort    | Value | Risk            |
+| -------------------------- | --------- | ----- | --------------- |
+| Progress sync (shipped)    | Done      | High  | Low             |
+| Status sync (Phase 9)      | Small     | High  | Low             |
+| Annotation sync (Phase 10) | **Large** | High  | **Medium-high** |
 
 ---
 
@@ -31,14 +31,14 @@
 
 The Readest sync API has **one** endpoint, `GET/POST /api/sync`, with a `type` discriminator:
 
-| `type` | Method | Direction | What it carries |
-|--------|--------|-----------|-----------------|
-| `books` | GET | Pull | Book metadata + `progress` tuple + `reading_status` (used by the shipped bridge) |
-| `configs` | GET | Pull per-book | `book_configs` rows: exact resume position as xpointer + `progress` tuple |
-| `configs` | POST | Push per-book | Same shape |
-| `notes` | GET | Pull per-book | `notes` array: annotations/bookmarks/highlights |
-| `notes` | POST | Push per-book | `notes` array: annotations/bookmarks/highlights |
-| `notes` | (implicit in full pull) | — | **NOT** returned by `type=books` — confirmed by live curl |
+| `type`    | Method                  | Direction     | What it carries                                                                  |
+| --------- | ----------------------- | ------------- | -------------------------------------------------------------------------------- |
+| `books`   | GET                     | Pull          | Book metadata + `progress` tuple + `reading_status` (used by the shipped bridge) |
+| `configs` | GET                     | Pull per-book | `book_configs` rows: exact resume position as xpointer + `progress` tuple        |
+| `configs` | POST                    | Push per-book | Same shape                                                                       |
+| `notes`   | GET                     | Pull per-book | `notes` array: annotations/bookmarks/highlights                                  |
+| `notes`   | POST                    | Push per-book | `notes` array: annotations/bookmarks/highlights                                  |
+| `notes`   | (implicit in full pull) | —             | **NOT** returned by `type=books` — confirmed by live curl                        |
 
 **The user's live curl confirmed:** `GET /sync?type=books&since=0` returns `books: [...], configs: [], notes: [], statBooks: [], statPages: []` — progress is in `books`, but **notes are always per-book**, never in the bulk pull.
 
@@ -119,6 +119,7 @@ Authorization: Bearer <supabase_access_token>
 BookOrbit's annotation sync is **two-phase**, not one-shot:
 
 **Phase 1 — Ingest (client → server):**
+
 ```
 POST /koreader/plugin/annotations/exchange
 Authorization: x-auth-user / x-auth-key
@@ -157,6 +158,7 @@ Content-Type: application/json
 ```
 
 **Phase 1 response:**
+
 ```json
 {
   "results": [
@@ -185,6 +187,7 @@ Content-Type: application/json
 ```
 
 **Phase 2 — Ack (client → server):**
+
 ```
 POST /koreader/plugin/annotations/exchange-ack
 
@@ -219,6 +222,7 @@ POST /koreader/plugin/annotations/exchange-ack
 BookOrbit actually provides **two** annotation endpoints, and the choice matters:
 
 **Option A — Exchange (two-phase) — current canonical:**
+
 ```
 POST /koreader/plugin/annotations/exchange
 POST /koreader/plugin/annotations/exchange-ack
@@ -227,11 +231,13 @@ POST /koreader/plugin/annotations/exchange-ack
 This is what the BookOrbit plugin ≥0.4 uses. It's bidirectional (server can push web-created annotations down), tracks per-annotation identity for dedup/deletion, and is BookOrbit's maintained annotation-sync path. Complex but complete.
 
 **Option B — Legacy one-way upload — simplest:**
+
 ```
 POST /koreader/plugin/annotations
 ```
 
 Called from `bookorbit_plugin.annotation.service.uploadAnnotations` (service at `koreader-plugin-annotation.service.ts:26-80`). This is the deprecated path used by plugin 0.3.x. Same DTO shape, same server-side `AnnotationSyncService.ingestDeviceAnnotations`, but:
+
 - **No ack phase** — single POST, no push-down, no exchange-ack.
 - **No deletion detection** — no `keys`/`keysComplete` bookkeeping, no tombstone tracking.
 - **No server push-down** — no `toApply` response; appropriate for a one-way bridge.
@@ -243,6 +249,7 @@ The legacy endpoint is marked "Deprecated" but still present and functional. For
 From `db/schema/reader.ts:345-466` and `annotation-sync.service.ts`:
 
 **Canonical annotations table** (per user, per book):
+
 - `id` — serial primary key
 - `text` — highlighted passage (required, NOT NULL)
 - `color` — hex string (default `#FACC15` = yellow)
@@ -256,12 +263,14 @@ From `db/schema/reader.ts:345-466` and `annotation-sync.service.ts`:
 - `deviceUpdatedAt` — same format, updated on every device edit
 
 **Annotation positions table** (one row per format per annotation):
+
 - `format` — enum: `cfi | xpointer | pdf | kobo_span`
 - `pos0`, `pos1` — position text
 - `status` — enum: `exact | repaired | failed | pending`
 - `converterVersion` — which version of the position converter produced this
 
 **Annotation sync state table** (per device per book):
+
 - `externalKey` — `md5(deviceCreatedAt | pos0)` — the device-side dedup key
 - `lastAppliedVersion` — tracks what's been delivered to this device
 - `deleteAckedAt` — tombstone acknowledgment
@@ -285,6 +294,7 @@ BookOrbit's `position-converter.service.ts` implements bidirectional xpointer �
 Progress sync pulls **all books in one request** (`GET /sync?type=books&since=<watermark>`). Annotation sync **cannot** — it requires one `GET /sync?type=notes&book=...&meta_hash=...&since=...` **per book**. With a library of 350 books, that's 350 HTTP requests per full sync cycle, and each response could contain hundreds of annotations.
 
 The bridge must:
+
 1. First pull `books` (which it already does) to enumerate the user's library.
 2. Then, for every book with a non-null `meta_hash`, issue a separate `type=notes` pull.
 3. Batch the pushes to BookOrbit — the exchange DTO caps at `MAX_CHANGES_PER_REQUEST = 50` annotations per request and `20` books per request.
@@ -293,14 +303,15 @@ The bridge must:
 
 **The single hardest sub-problem.** Readest and BookOrbit use completely different annotation identity schemes:
 
-| | Readest | BookOrbit |
-|---|---------|-----------|
-| **Identity** | Deterministic MD5-7 of `"ko:" + bookHash + ":" + type + ":" + pos0 + ":" + pos1` | Auto-increment integer PK + per-device `deviceCreatedAt` + `md5(deviceCreatedAt + pos0)` external key |
-| **Dedup key** | Note ID (7-char MD5) | `externalKey = md5(deviceCreatedAt | pos0)` |
-| **Position** | xpointer (KOReader format) | xpointer / CFI / PDF / kobo_span |
-| **Timestamp format** | Unix milliseconds (numeric) | Wall-clock `"YYYY-MM-DD HH:MM:SS"` |
+|                      | Readest                                                                          | BookOrbit                                                                                             |
+| -------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **Identity**         | Deterministic MD5-7 of `"ko:" + bookHash + ":" + type + ":" + pos0 + ":" + pos1` | Auto-increment integer PK + per-device `deviceCreatedAt` + `md5(deviceCreatedAt + pos0)` external key |
+| **Dedup key**        | Note ID (7-char MD5)                                                             | `externalKey = md5(deviceCreatedAt                                                                    | pos0)` |
+| **Position**         | xpointer (KOReader format)                                                       | xpointer / CFI / PDF / kobo_span                                                                      |
+| **Timestamp format** | Unix milliseconds (numeric)                                                      | Wall-clock `"YYYY-MM-DD HH:MM:SS"`                                                                    |
 
 The bridge must:
+
 1. For each Readest note, synthesize a `deviceCreatedAt` that is **stable** — the same Readest note must map to the same BookOrbit annotation across every poll cycle, or you get duplicates. Deriving it from Readest's `createdAt` (a millisecond epoch) converts to the same wall-clock string every time for the same note.
 2. Convert Readest's `createdAt` (ms epoch) to `deviceCreatedAt` ("YYYY-MM-DD HH:MM:SS") deterministically.
 3. Compute BookOrbit's `externalKey` as `md5(deviceCreatedAt + "|" + pos0)` to match the plugin's dedup logic (`bookorbit_annotations.lua:36`: `md5(deviceCreatedAt.."|"..pos0)`).
@@ -311,6 +322,7 @@ The bridge must:
 The Readest per-book notes pull accepts `since` as a ms timestamp, but the response contains `createdAt`/`updatedAt` as ISO strings. The bridge must maintain a **per-book notes watermark** — NOT the same as the progress watermark, because notes change much less frequently than progress.
 
 But there's a subtlety: the Readest sync API's `pullChanges` uses `since` as a **delta filter** — it returns only notes updated after that timestamp. The bridge needs to store, per book:
+
 - The last `since` value used for notes
 - The mapping of Readest note ID → BookOrbit annotation ServerID
 - Whether a tombstone (deleted note) has been acked
@@ -320,22 +332,26 @@ But there's a subtlety: the Readest sync API's `pullChanges` uses `since` as a *
 Three different color systems must be reconciled:
 
 **Readest colors** (7 named + 3 hex):
+
 - Named: `yellow`, `red`, `green`, `blue`, `purple=violet`, `orange=#ff8800`, `cyan=#00bcd4`, `olive=#808000`, `gray=#9e9e9e`
 
 **KOReader colors** (BlitBuffer HIGHLIGHT_COLORS):
+
 - `yellow=#FACC15`, `red=#F87171`, `green=#4ADE80`, `blue=#38BDF8`, `purple=#F472B6`, `orange=#FF8800`, `cyan=#22D3EE`, `olive=#84CC16`, `gray=#9CA3AF`
 
 **BookOrbit colors** (3 app colors + nearest-neighbor mapping):
+
 - `ANNOTATION_HIGHLIGHT_COLORS`: `yellow=#FACC15`, `green=#4ADE80`, `blue=#38BDF8`, `purple=#F472B6`, plus fallbacks for everything else
 
 The mapping **loses fidelity** in the bridge direction because Readest supports 9 distinct colors but BookOrbit's app palette has only 4 canonical values. The server uses `koreaderColorFromHex()` to pick the nearest chromatic neighbor for non-canonical hexes, which is defined in `annotation-style-map.ts`.
 
 **Style mapping:**
-| Readest | KOReader drawer | BookOrbit style |
-|---------|-----------------|-----------------|
-| `highlight` | `lighten` | `highlight` |
-| `underline` | `underscore` | `underline` |
-| `squiggly` | `strikeout` | `squiggly` |
+
+| Readest     | KOReader drawer | BookOrbit style |
+| ----------- | --------------- | --------------- |
+| `highlight` | `lighten`       | `highlight`     |
+| `underline` | `underscore`    | `underline`     |
+| `squiggly`  | `strikeout`     | `squiggly`      |
 
 ### 4.5 The apply-mode problem (live vs. sidecar vs. skip)
 
@@ -406,17 +422,18 @@ This is materially heavier than the current state schema, which tracks only `Las
 
 ## 6. Feasibility Assessment
 
-| Criterion | Assessment |
-|-----------|------------|
-| Can the bridge pull annotations from Readest? | **Yes** — `GET /sync?type=notes&book=...&meta_hash=...&since=...` is per-book but works. The shipped bridge already has Bearer auth. |
-| Can the bridge push annotations to BookOrbit without a live document? | **Yes** — the exchange protocol has an explicit "skip" apply mode and accepts uploads from the client side. The server stores them with `origin: 'koreader'`. |
-| Can the bridge convert Readest note → KOReader annotation DTO? | **Yes, with mapping loss** — colors are lossy (9 → 4 canonical values), style maps cleanly, positions pass through as xpointers. |
-| Can the bridge handle deletions? | **Yes, with extra state** — need per-book note tracking so tombstones can be generated when a note disappears from the Readest pull. |
-| Can the bridge handle BookOrbit's position conversion? | **Yes** — since Readest xpointers are already KOReader-compatible, the bridge just sets `posFormat: "xpointer"`. No CFI conversion needed on the bridge side. The server handles xpointer → CFI conversion internally if a PDF or Kobo device later needs it. |
-| Can the bridge handle the identity/dedup problem? | **Yes, but it's the hardest part** — deterministic `deviceCreatedAt` + `externalKey` computation per note is required to avoid duplicates. |
-| Does annotation sync work with the current one-way-only model? | **Yes** — the bridge pushes Readest annotations to BookOrbit and ignores BookOrbit's push-downs (no live reader to apply them to). |
+| Criterion                                                             | Assessment                                                                                                                                                                                                                                                    |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Can the bridge pull annotations from Readest?                         | **Yes** — `GET /sync?type=notes&book=...&meta_hash=...&since=...` is per-book but works. The shipped bridge already has Bearer auth.                                                                                                                          |
+| Can the bridge push annotations to BookOrbit without a live document? | **Yes** — the exchange protocol has an explicit "skip" apply mode and accepts uploads from the client side. The server stores them with `origin: 'koreader'`.                                                                                                 |
+| Can the bridge convert Readest note → KOReader annotation DTO?        | **Yes, with mapping loss** — colors are lossy (9 → 4 canonical values), style maps cleanly, positions pass through as xpointers.                                                                                                                              |
+| Can the bridge handle deletions?                                      | **Yes, with extra state** — need per-book note tracking so tombstones can be generated when a note disappears from the Readest pull.                                                                                                                          |
+| Can the bridge handle BookOrbit's position conversion?                | **Yes** — since Readest xpointers are already KOReader-compatible, the bridge just sets `posFormat: "xpointer"`. No CFI conversion needed on the bridge side. The server handles xpointer → CFI conversion internally if a PDF or Kobo device later needs it. |
+| Can the bridge handle the identity/dedup problem?                     | **Yes, but it's the hardest part** — deterministic `deviceCreatedAt` + `externalKey` computation per note is required to avoid duplicates.                                                                                                                    |
+| Does annotation sync work with the current one-way-only model?        | **Yes** — the bridge pushes Readest annotations to BookOrbit and ignores BookOrbit's push-downs (no live reader to apply them to).                                                                                                                            |
 
 **Verdict: Moderate-to-hard.** Not because the APIs are secret or undocumented (they're both visible in the plugin sources), but because:
+
 - **N requests per sync** (one per book) vs. 1 request for progress
 - **Complex identity management** (deterministic keys to prevent duplicates)
 - **Extra state store requirements** (per-book note tracking)
@@ -466,9 +483,9 @@ type NoteSnapshot struct {
 
 ```yaml
 bridge:
-  sync_annotations: false    # opt-in like sync_status
-  annotation_batch_size: 50   # MAX_CHANGES_PER_REQUEST
-  annotation_books_per_req: 20  # max books per exchange request
+  sync_annotations: false # opt-in like sync_status
+  annotation_batch_size: 50 # MAX_CHANGES_PER_REQUEST
+  annotation_books_per_req: 20 # max books per exchange request
 ```
 
 ### 7.4 The flow would become
@@ -499,16 +516,16 @@ bridge:
 
 ## 8. Risks and Unknowns
 
-| # | Risk / Unknown | Evidence / Mitigation |
-|---|---------------|----------------------|
-| 1 | **Per-book note pull amplifies request count.** 350 books × 1 request each = 350 requests per cycle. With 15-min polling, that's 1,400 req/hr. Readest's API may rate-limit. | Mitigation: stagger notes pull across polls (e.g., pull notes only every 4th poll cycle, or only for books whose progress changed). The `page` field on notes gives a cheap heuristic: if progress hasn't moved, notes probably haven't changed. |
-| 2 | **Readest web deletion → tombstone → bridge → BookOrbit deletion.** If Readest web deletes a highlight, the note's `deleted_at` is set. The bridge must distinguish "note was deleted" (push tombstone) from "note wasn't in this delta pull (since filter)" (don't push). | Mitigation: the `since` filter on `pullChanges` returns all notes updated after the timestamp, including tombstones. Notes UPDATED before `since` are simply not returned — they stay in the bridge's state. Notes that appear with `deleted_at` set are tombstones to push. |
-| 3 | **Color loss.** Readest web has no color picker (highlights are always yellow by default). All Readest-native highlights are `yellow`. Colors only become non-yellow when a KOReader device pushes them. Since the bridge will be Readest-only, all colors will be `yellow` — no loss in practice. | Verified: `KO_TO_READEST_COLOR` map only kicks in when the KOReader plugin pushes its own annotations. A bridge that only reads Readest sees only `yellow` unless a KOReader device also syncs. |
-| 4 | **Duplicate prevention across restarts.** The `deviceCreatedAt` must be derived deterministically from Readest's `createdAt` to prevent re-creating the same annotation on every poll. | Deterministic derivation: `deviceCreatedAt = formatDeviceDatetime(createdAt_ms_epoch)`. Since we're deriving from a Readest-provided ms-epoch value, the result is stable. |
-| 5 | **BookOrbit ack-side corrections.** The server may send corrected xpointers in `toApply` when a pushed xpointer doesn't resolve. The bridge can't verify these (no live crengine). | Mitigation: ignore corrections. The server marks them `status: 'pending'` if the client doesn't ack with `corrected: true`. Other devices (a real KOReader) would fix them later. |
-| 6 | **The exchange-ack is mandatory.** Even for one-way, the bridge must call `exchange-ack` or the server will re-queue the same push-downs forever. | Mitigation: always send `{ applied: [], deleted: [] }`, ack count is zero, no edits/deletes applied locally. |
-| 7 | **Readest notes may not have a `page` field.** `page` is populated by the KOReader plugin but might be null for web-created notes (no KOReader page concept in Readest web). | Mitigation: treat `pageno` as optional (nullable in DTO). The server stores it as `extras.pageno` if provided. |
-| 8 | **Rate limiting on `/sync` POST.** Unknown. The KOReader plugin doesn't seem to have aggressive rate limiting, but the bridge could push large payloads. | Mitigation: respect the `900KB` body-size limit per request (already enforced in the client). Split large batches. |
+| #   | Risk / Unknown                                                                                                                                                                                                                                                                                     | Evidence / Mitigation                                                                                                                                                                                                                                                        |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | **Per-book note pull amplifies request count.** 350 books × 1 request each = 350 requests per cycle. With 15-min polling, that's 1,400 req/hr. Readest's API may rate-limit.                                                                                                                       | Mitigation: stagger notes pull across polls (e.g., pull notes only every 4th poll cycle, or only for books whose progress changed). The `page` field on notes gives a cheap heuristic: if progress hasn't moved, notes probably haven't changed.                             |
+| 2   | **Readest web deletion → tombstone → bridge → BookOrbit deletion.** If Readest web deletes a highlight, the note's `deleted_at` is set. The bridge must distinguish "note was deleted" (push tombstone) from "note wasn't in this delta pull (since filter)" (don't push).                         | Mitigation: the `since` filter on `pullChanges` returns all notes updated after the timestamp, including tombstones. Notes UPDATED before `since` are simply not returned — they stay in the bridge's state. Notes that appear with `deleted_at` set are tombstones to push. |
+| 3   | **Color loss.** Readest web has no color picker (highlights are always yellow by default). All Readest-native highlights are `yellow`. Colors only become non-yellow when a KOReader device pushes them. Since the bridge will be Readest-only, all colors will be `yellow` — no loss in practice. | Verified: `KO_TO_READEST_COLOR` map only kicks in when the KOReader plugin pushes its own annotations. A bridge that only reads Readest sees only `yellow` unless a KOReader device also syncs.                                                                              |
+| 4   | **Duplicate prevention across restarts.** The `deviceCreatedAt` must be derived deterministically from Readest's `createdAt` to prevent re-creating the same annotation on every poll.                                                                                                             | Deterministic derivation: `deviceCreatedAt = formatDeviceDatetime(createdAt_ms_epoch)`. Since we're deriving from a Readest-provided ms-epoch value, the result is stable.                                                                                                   |
+| 5   | **BookOrbit ack-side corrections.** The server may send corrected xpointers in `toApply` when a pushed xpointer doesn't resolve. The bridge can't verify these (no live crengine).                                                                                                                 | Mitigation: ignore corrections. The server marks them `status: 'pending'` if the client doesn't ack with `corrected: true`. Other devices (a real KOReader) would fix them later.                                                                                            |
+| 6   | **The exchange-ack is mandatory.** Even for one-way, the bridge must call `exchange-ack` or the server will re-queue the same push-downs forever.                                                                                                                                                  | Mitigation: always send `{ applied: [], deleted: [] }`, ack count is zero, no edits/deletes applied locally.                                                                                                                                                                 |
+| 7   | **Readest notes may not have a `page` field.** `page` is populated by the KOReader plugin but might be null for web-created notes (no KOReader page concept in Readest web).                                                                                                                       | Mitigation: treat `pageno` as optional (nullable in DTO). The server stores it as `extras.pageno` if provided.                                                                                                                                                               |
+| 8   | **Rate limiting on `/sync` POST.** Unknown. The KOReader plugin doesn't seem to have aggressive rate limiting, but the bridge could push large payloads.                                                                                                                                           | Mitigation: respect the `900KB` body-size limit per request (already enforced in the client). Split large batches.                                                                                                                                                           |
 
 ---
 
@@ -532,13 +549,13 @@ internal/sync/engine.go          — extend: call annotations step if enabled
 
 Given the Phase 9 (status sync) design already established:
 
-| Phase | What | Effort | Value |
-|-------|------|--------|-------|
-| 9 | Status sync (design done, ready to implement) | Small | High |
-| 10 | Annotation sync — pull-only | **Medium** — pull notes from Readest, store in state, push to BookOrbit exchange as one-way | Medium |
-| 10a | Annotation sync — deletion detection | **Medium-hard** — add per-book full note tracking, tombstone generation | Low (most users never delete) |
-| 10b | Annotation sync — ack protocol compliance | **Small** — always ack with empty applied list | Medium (protocol correctness) |
-| 10c | Local annotation cache (for keys-complete) | **Hard** — persistent per-book note snapshot state | Medium |
+| Phase | What                                          | Effort                                                                                      | Value                         |
+| ----- | --------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------- |
+| 9     | Status sync (design done, ready to implement) | Small                                                                                       | High                          |
+| 10    | Annotation sync — pull-only                   | **Medium** — pull notes from Readest, store in state, push to BookOrbit exchange as one-way | Medium                        |
+| 10a   | Annotation sync — deletion detection          | **Medium-hard** — add per-book full note tracking, tombstone generation                     | Low (most users never delete) |
+| 10b   | Annotation sync — ack protocol compliance     | **Small** — always ack with empty applied list                                              | Medium (protocol correctness) |
+| 10c   | Local annotation cache (for keys-complete)    | **Hard** — persistent per-book note snapshot state                                          | Medium                        |
 
 **Phase 10 can be decomposed:** start with the simplest feature (pull + push, no deletions, no ack), ship it behind a config flag, then incrementally add deletion detection and proper ack handling. The exchange protocol is designed for exactly this kind of incremental capability.
 
@@ -551,6 +568,7 @@ Given the Phase 9 (status sync) design already established:
 **But it is not free.** The per-book nature of Readest's notes API, the identity/dedup problem, the state-tracking requirements for deletion detection, and the two-phase exchange protocol make this the single largest feature the bridge would carry. It deserves its own phase (Phase 10), its own ADR, and its own live-validation pass.
 
 The recommended sequence is:
+
 1. **Ship Phase 9 (status)** — three mappings, tiny touch surface, immediate user value
 2. **Couple it with the annotation-pull-side scaffolding** — the bridge needs the per-book notes pull client anyway
 3. **Ship Phase 10 (annotations)** once the notes pull is stable, with deletion detection as a follow-up
@@ -559,4 +577,4 @@ Each phase builds on the last: progress → status → annotations. All one-way,
 
 ---
 
-*Prepared from: `reference/readest.koplugin/readest_syncannotations.lua`, `reference/readest.koplugin/spec/syncannotations_spec.lua`, `reference/readest.koplugin/readest-sync-api.json`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_annotations.lua`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_api.lua`, `reference/bookorbit/server/src/modules/koreader/koreader-annotation-exchange.service.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-exchange.dto.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-plugin.dto.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-sync.service.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-style-map.ts`, `reference/bookorbit/server/src/modules/position-converter/position-converter.service.ts`, and the project's existing [status-sync design documentation](docs/phases/phase-09-status-sync/design.md).*
+_Prepared from: `reference/readest.koplugin/readest_syncannotations.lua`, `reference/readest.koplugin/spec/syncannotations_spec.lua`, `reference/readest.koplugin/readest-sync-api.json`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_annotations.lua`, `reference/koreader-plugin/bookorbit.koplugin/bookorbit_api.lua`, `reference/bookorbit/server/src/modules/koreader/koreader-annotation-exchange.service.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-exchange.dto.ts`, `reference/bookorbit/server/src/modules/koreader/dto/koreader-plugin.dto.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-sync.service.ts`, `reference/bookorbit/server/src/modules/annotation/annotation-style-map.ts`, `reference/bookorbit/server/src/modules/position-converter/position-converter.service.ts`, and the project's existing [status-sync design documentation](docs/phases/phase-09-status-sync/design.md)._
